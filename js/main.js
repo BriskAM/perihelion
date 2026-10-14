@@ -38,6 +38,7 @@ const missions = makeMissions(universe);
 function applyShip() {
   autopilot.assist = state.options.assist;
   autopilot.orbitFirst = state.options.orbit;
+  autopilot.pace = state.options.pace;
   universe.style.fancy = state.options.fancy;
   universe.style.warp = state.options.warp;
   universe.style.strict = state.options.strict;
@@ -326,14 +327,33 @@ let hudClock = 1000, lastMs = 0;
 // Ship cam: a fixed close-up of the ship, with its velocity (relative to the nearest world) and thrust.
 function drawShipCam() {
   const u = universe, ship = u.ship;
-  const show = state.options.pip && cam.zoom < 0.4 && !ship.consumed;
+  // ship close-up when the main view is zoomed out; while the autopilot idles it is always up, and
+  // when the main view is zoomed in it switches to a wide overview of the trip instead
+  const overview = cam.zoom >= 0.4;
+  const show = state.options.pip && (cam.zoom < 0.4 || autopilot.enabled) && !ship.consumed;
   pip.hidden = !show;
   if (!show) return;
   const d = Math.min(window.devicePixelRatio || 1, 2);
   if (pip.width !== PIP_SIZE * d) { pip.width = pip.height = PIP_SIZE * d; }
-  renderUniverse(pipCtx, u, { x: ship.pos.x, y: ship.pos.y, zoom: PIP_ZOOM }, PIP_SIZE, PIP_SIZE, d);
+  const tgt = autopilot.enabled ? autopilot.target : null;
+  const span = tgt ? Math.max(1500, dist(tgt.pos, ship.pos)) : 20_000;
+  const zoomNow = overview ? clamp(62 / span, 0.0008, 0.3) : PIP_ZOOM;
+  renderUniverse(pipCtx, u, { x: ship.pos.x, y: ship.pos.y, zoom: zoomNow }, PIP_SIZE, PIP_SIZE, d);
   pipCtx.setTransform(d, 0, 0, d, 0, 0);
   const c = PIP_SIZE / 2, ref = u.closestPlanet();
+  if (overview) { // wide view: mark the ship and the target it is flying to
+    pipCtx.strokeStyle = '#fff'; pipCtx.lineWidth = 1.5;
+    pipCtx.beginPath(); pipCtx.arc(c, c, 4, 0, Math.PI * 2); pipCtx.stroke();
+    if (tgt) {
+      const tx = c + (tgt.pos.x - ship.pos.x) * zoomNow, ty = c + (tgt.pos.y - ship.pos.y) * zoomNow;
+      pipCtx.strokeStyle = '#4c8df6'; pipCtx.setLineDash([3, 3]);
+      pipCtx.beginPath(); pipCtx.moveTo(c, c); pipCtx.lineTo(tx, ty); pipCtx.stroke(); pipCtx.setLineDash([]);
+      pipCtx.beginPath(); pipCtx.arc(tx, ty, 6, 0, Math.PI * 2); pipCtx.stroke();
+    }
+    pipCtx.fillStyle = '#b7b7ff'; pipCtx.font = '9px ui-monospace, Menlo, monospace'; pipCtx.textAlign = 'center';
+    pipCtx.fillText(`${autopilot.strategy}${tgt ? ' > ' + tgt.name.split(' ').pop() : ''}`, c, PIP_SIZE - 9);
+    return;
+  }
   const rel = sub(ship.velocity, ref.velocity), speed = mag(rel);
   const arrow = (vx, vy, len, color, width) => {
     pipCtx.strokeStyle = color; pipCtx.fillStyle = color; pipCtx.lineWidth = width;
@@ -349,7 +369,7 @@ function drawShipCam() {
   pipCtx.fillStyle = '#b7b7ff';
   pipCtx.font = '9px ui-monospace, Menlo, monospace';
   pipCtx.textAlign = 'center';
-  pipCtx.fillText(`${Math.round(speed)} rel ${ref.name.split(' ').pop()}`, c, PIP_SIZE - 9);
+  pipCtx.fillText(autopilot.enabled ? `${autopilot.strategy}  ${Math.round(speed)} rel ${ref.name.split(' ').pop()}` : `${Math.round(speed)} rel ${ref.name.split(' ').pop()}`, c, PIP_SIZE - 9);
   pipCtx.fillStyle = '#4ade80'; pipCtx.textAlign = 'left'; pipCtx.fillText('vel', 14, 14);
   pipCtx.fillStyle = '#ff8800'; pipCtx.fillText('thrust', 14, 25);
 }

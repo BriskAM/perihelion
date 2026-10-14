@@ -29,6 +29,7 @@ export class Autopilot {
     this.rng = rng;
     this.enabled = false;
     this.assist = true;
+    this.pace = 1; // 0.6 calm .. 2.2 turbo: turning, lock-on, sightseeing and the orbit phases all scale with it
     this.orbitFirst = true; // land via a captured orbit rather than a straight braking burn
     this.manual = false; // set by the input layer while the stick is held
     this.target = null;
@@ -52,6 +53,9 @@ export class Autopilot {
     this.strategy = 'NONE';
     this.debug = '';
   }
+
+  get turn() { return TURN_RATE * this.pace; }
+  get landTurn() { return LANDING_TURN_RATE * this.pace; }
 
   get telemetry() {
     if (!this.enabled) return '';
@@ -305,7 +309,7 @@ export class Autopilot {
     if (this.universe.now < this.escapeUntil) { // wriggle out of a rock field we are pinned in
       this.strategy = 'ESCAPING';
       const dv = sub(mul(this.escapeDir, 450), relativeV);
-      this.setAngle(angleOf(dv), TURN_RATE);
+      this.setAngle(angleOf(dv), this.turn);
       const off = Math.abs(wrap(angleOf(dv) - ship.angle));
       ship.thrust = fromAngle(ship.angle, off < 0.5 ? clamp(mag(dv) / 300, 0.2, 1) : 0);
       return;
@@ -327,7 +331,7 @@ export class Autopilot {
       const away = angleOf(sub(ship.pos, target.pos)), d = mag(targetVector) + 0;
       const g = (GRAVITATION * SPACECRAFT_MASS * target.mass) / (d * d);
       const closing = dot(relativeV, mul(targetVector, 1 / d));
-      this.setAngle(away, LANDING_TURN_RATE);
+      this.setAngle(away, this.landTurn);
       const aligned = Math.abs(wrap(away - ship.angle)) < 0.5;
       ship.thrust = aligned ? fromAngle(ship.angle, clamp(g / MAIN_ENGINE_ACCEL + closing / 300, 0, 1)) : vec();
       this.dwell = (this.dwell ?? 0) + this.universe.dt;
@@ -341,7 +345,7 @@ export class Autopilot {
       const speed = mag(relativeV);
       const braking = speed > 0.35 * safe;
       const heading = braking ? angleOf(mul(relativeV, -1)) : angleOf(sub(ship.pos, target.pos));
-      this.setAngle(heading, LANDING_TURN_RATE);
+      this.setAngle(heading, this.landTurn);
       const aligned = Math.abs(wrap(heading - ship.angle)) < 0.5;
       ship.thrust = braking && aligned ? fromAngle(ship.angle, clamp((speed - 0.2 * safe) / 150, 0.1, 1)) : vec();
       return;
@@ -371,7 +375,7 @@ export class Autopilot {
     // moons sweep through at hundreds of units a second: be slow while crossing a planet's moon swarm
     const zone = this.moonZone(target);
     if (zone) approach = Math.min(approach, Math.sqrt(2 * 600 * Math.max(0, mag(targetVector) - zone)) + 300);
-    approach = Math.min(0.72 * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, aim), approach);
+    approach = Math.min(Math.min(0.9, 0.72 * (0.85 + 0.15 * this.pace)) * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, aim), approach);
     const push = this.avoidance(ship, aim, target);
     if (this.avoidActive || route) approach = Math.min(approach, route ? 2200 : 1800); // stay agile enough to steer around the obstacle
     const desired = add(mul(dir, approach), mul(push, 0.9 * approach));
@@ -380,7 +384,7 @@ export class Autopilot {
     const along = dot(relativeV, dir);
     this.strategy = dvMag < 60 ? 'CRUISING' : along < approach * 0.9 && dot(dv, dir) > 0 ? 'CHASING' : 'APPROACHING';
     if (dvMag < 60) { ship.thrust = vec(); return; } // already on the curve: coast
-    this.setAngle(angleOf(dv), TURN_RATE);
+    this.setAngle(angleOf(dv), this.turn);
     const off = Math.abs(wrap(angleOf(dv) - ship.angle));
     ship.thrust = fromAngle(ship.angle, off < 0.5 ? clamp(dvMag / 300, 0.15, 1) : 0);
   }
@@ -407,7 +411,7 @@ export class Autopilot {
   }
 
   /** Burn toward the wanted velocity `vDes` (relative to the target), but only once pointed that way. */
-  burnToward(ship, vDes, relativeV, gain = 250, turn = TURN_RATE) {
+  burnToward(ship, vDes, relativeV, gain = 250, turn = this.turn) {
     const dv = sub(vDes, relativeV), m = mag(dv);
     if (m < 25) { ship.thrust = vec(); return m; }
     this.setAngle(angleOf(dv), turn);
@@ -440,6 +444,7 @@ export class Autopilot {
   /** Returns true when it handled this frame; false to let the direct-landing code run. */
   guideOrbit(ship, target, targetVector, altitude, relativeV, plan, { safe, brake, hover }) {
     const now = this.universe.now;
+    const q = this.pace ** 1.3; // the orbit phases speed up a little more than everything else
     const r = mag(targetVector), rhat = mul(targetVector, -1 / (r || 1)), that = vec(-rhat.y, rhat.x);
     const vr = dot(relativeV, rhat), vt = dot(relativeV, that), vc = Math.sqrt(plan.mu / r);
     const sense = vt >= 0 ? 1 : -1; // keep whichever way round we are already going
@@ -450,12 +455,12 @@ export class Autopilot {
 
     if (this.orbitPhase === 'far') {
       // aim to one side of the planet, so gravity bends the path into a low pass instead of a dive
-      const vArr = 1.05 * Math.sqrt((2 * plan.mu) / plan.rCap) + 60;
+      const vArr = (1.05 * Math.sqrt((2 * plan.mu) / plan.rCap) + 60) * (1 + 0.35 * (this.pace - 1));
       const eps = (vArr * vArr) / 2 - plan.mu / plan.rCap;
       const vPeri = Math.sqrt(2 * (eps + plan.mu / plan.rOrb));
       const b = plan.rCap * clamp((plan.rOrb * vPeri) / (plan.rCap * vArr), 0, 0.85);
       const u = mul(targetVector, 1 / r), aim = add(targetVector, mul(vec(-u.y, u.x), b));
-      const approach = Math.sqrt(2 * 700 * Math.max(0, r - plan.rCap)) + vArr;
+      const approach = Math.sqrt(2 * Math.min(950, 700 * this.pace) * Math.max(0, r - plan.rCap)) + vArr;
       this.cruise(ship, target, aim, targetVector, approach, relativeV);
       return true;
     }
@@ -468,14 +473,14 @@ export class Autopilot {
         if (circular) { this.orbitPhase = 'orbit'; this.orbitSince = now; }
         else if (now - this.orbitSince > 90) { this.orbitPhase = 'descent'; }
       } else if (!circular) this.orbitPhase = 'capture';
-      else if (now - this.orbitSince > 1.5) this.orbitPhase = 'descent';
+      else if (now - this.orbitSince > 1.5 / q) this.orbitPhase = 'descent';
     }
 
     if (this.orbitPhase === 'capture') {
       this.strategy = 'CAPTURE';
       this.debug = `r ${(r / plan.rOrb).toFixed(2)} of orbit`;
-      const vDes = add(add(mul(that, sense * vc), mul(rhat, clamp((plan.rOrb - r) * 0.8, -450, 450))), this.moonDodge(ship, target));
-      this.burnToward(ship, vDes, relativeV);
+      const vDes = add(add(mul(that, sense * vc), mul(rhat, clamp((plan.rOrb - r) * 0.8 * q, -450 * q, 450 * q))), this.moonDodge(ship, target));
+      this.burnToward(ship, vDes, relativeV, 250 / q);
       return true;
     }
     if (this.orbitPhase === 'orbit') {
@@ -490,14 +495,14 @@ export class Autopilot {
     this.strategy = 'DESCENT';
     this.debug = `alt ${Math.round(alt)}`;
     const s = clamp((alt - stopAlt) / Math.max(1, plan.rOrb - target.radius - stopAlt), 0, 1);
-    const vDes = add(add(mul(that, sense * vc * 0.9 * s), mul(rhat, -clamp(0.4 * Math.sqrt(2 * brake * (alt - stopAlt)), 30, 260))), this.moonDodge(ship, target));
+    const vDes = add(add(mul(that, sense * vc * 0.9 * s), mul(rhat, -clamp(0.4 * q * Math.sqrt(2 * brake * (alt - stopAlt)), 30 * q, 260 * q))), this.moonDodge(ship, target));
     const rho = densityAt(target, alt);
     if (rho > 0.02 && mag(relativeV) >= mag(vDes) * 0.9 && ship.heat < 0.5) { // let the air do the braking
       ship.thrust = vec();
       this.strategy = 'AEROBRAKE';
       return true;
     }
-    this.burnToward(ship, vDes, relativeV, 200, LANDING_TURN_RATE);
+    this.burnToward(ship, vDes, relativeV, 200 / q, this.landTurn);
     return true;
   }
 
@@ -529,7 +534,7 @@ export class Autopilot {
     }
     // smooth turning toward the heading the current strategy asked for
     if (this.assist && this.desiredAngle !== null && !ship.landing) {
-      const step = (this.turnRate ?? TURN_RATE) * dt;
+      const step = (this.turnRate ?? this.turn) * dt;
       ship.angle = wrap(ship.angle + clamp(wrap(this.desiredAngle - ship.angle), -step, step));
     }
 
@@ -552,7 +557,7 @@ export class Autopilot {
         this.refuelling = false;
         this.lock = 0;
         this.landingAltitude = 0;
-        this.nextStrategyTime = sim.now + (this.ai ? this.rng.range(8, 25) : this.sightseeing);
+        this.nextStrategyTime = sim.now + (this.ai ? this.rng.range(8, 25) : this.sightseeing / this.pace);
       } else if (this.fuelState && this.fuelState.level < 0.9 * this.fuelState.capacity) {
         this.strategy = 'REFUELLING'; // wait for a full tank before lifting off
         this.debug = `${Math.round((this.fuelState.level / this.fuelState.capacity) * 100)}%`;
@@ -646,8 +651,8 @@ export class Autopilot {
       this.strategy = 'ACQUIRING';
       this.debug = '';
       ship.thrust = vec();
-      this.setAngle(angleOf(sub(target.pos, ship.pos)), TURN_RATE);
-      this.lock = Math.min(1, this.lock + dt / this.lockTime);
+      this.setAngle(angleOf(sub(target.pos, ship.pos)), this.turn);
+      this.lock = Math.min(1, this.lock + (dt * this.pace) / this.lockTime);
       this.leadingPos = target.pos;
       return;
     }
@@ -673,11 +678,11 @@ export class Autopilot {
       this.guide(ship, target, targetVector, altitude, relativeV);
     } else if (altitude < this.landingAltitude) {
       this.strategy = 'LANDING'; // zero thrust, face away from the ground
-      this.setAngle(angleOf(sub(ship.pos, target.pos)), LANDING_TURN_RATE);
+      this.setAngle(angleOf(sub(ship.pos, target.pos)), this.landTurn);
       ship.thrust = vec();
     } else if (relativeSpeed < 0 || altitude > this.brakingDistance) {
       this.strategy = 'CHASING'; // make tracks
-      this.setAngle(angleOf(leadingVector), TURN_RATE);
+      this.setAngle(angleOf(leadingVector), this.turn);
       // in assisted mode, only burn once roughly pointed the right way
       const off = Math.abs(wrap(this.desiredAngle - ship.angle));
       // assisted: coast (save fuel) at top speed, but only while the velocity is already
@@ -687,7 +692,7 @@ export class Autopilot {
       ship.thrust = fromAngle(ship.angle, this.assist ? (off < 0.6 && !cruising ? 1 : 0) : 1);
     } else {
       this.strategy = 'APPROACHING'; // bleed off velocity; gravity does the rest
-      this.setAngle(angleOf(mul(ship.velocity, -1)), TURN_RATE);
+      this.setAngle(angleOf(mul(ship.velocity, -1)), this.turn);
       const decel = relativeSpeed / timeToTarget;
       const off = this.assist ? Math.abs(wrap(this.desiredAngle - ship.angle)) : 0;
       ship.thrust = fromAngle(ship.angle, off < 0.6 ? (decel / MAIN_ENGINE_ACCEL) * 0.9 : 0);

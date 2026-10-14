@@ -138,6 +138,16 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('strict', 'Strict landing', 'You must slow down to land: too fast and you bounce and take damage, far too fast and the ship is destroyed. The limit is higher on heavy planets. Off = land at any speed.');
     toggleRow('warp', 'Warped gravity grid', 'The background grid dips into stars, black holes and big planets. Off = flat grid.');
     toggleRow('orbit', 'Orbit-first landings', 'The autopilot captures into a low orbit, then spirals down (using the air where there is some) instead of braking in a straight line. Only for planets with room for a stable orbit.');
+    const pace = el('div', 'card');
+    pace.append(el('div', 'title', 'Autopilot pace'), el('div', 'dim', 'How briskly it turns, locks on, flies in and drops through orbit. Faster is a bit riskier.'));
+    const paceRow = el('div', 'btnrow');
+    for (const [label, v] of [['CALM', 0.6], ['NORMAL', 1], ['FAST', 1.6], ['TURBO', 2.2]]) {
+      const b = button(label, () => actions.option('pace', v));
+      b.classList.toggle('picked', state.options.pace === v);
+      paceRow.append(b);
+    }
+    pace.append(paceRow);
+    body.append(pace);
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');
