@@ -27,6 +27,16 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   rings. Get close and time slows, the screen trembles and your ship stretches; cross the horizon
   and you are lost (you respawn parked on a planet, minus a quarter of your credits).
 - The background grid sags into stars, black holes and big planets (switch it off in the menu).
+- Strict landing: you must slow down to touch down. The speed limit depends on the planet (heavy
+  planets pull harder than the engine, so they forgive more). Too fast and you bounce and take
+  damage; far too fast and the ship is destroyed. The HUD shows `REL: speed/limit` near a surface.
+  Switch it off in the menu to land at any speed.
+- Not every system has everything: each system rolls a character (barren, ordinary, crowded,
+  deserted) that changes how many moons, rings, belts, binary planets and AI ships it gets.
+- Asteroid belts differ too: some are dense, some sparse, some clumpy, with bigger or smaller rocks.
+- The autopilot always charts a course to somewhere new: it picks among uncharted worlds, weighted
+  toward nearer ones, steers around stars, black holes, planets and rocks, and watches its fuel.
+  (Moons of very heavy planets are left to you.)
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment

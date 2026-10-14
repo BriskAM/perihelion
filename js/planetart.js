@@ -124,7 +124,7 @@ export function visual(p) {
   }));
   else outline.arc(0, 0, 1, 0, PI2);
 
-  const rings = !p.isMoon && R > 600 && rng() < 0.45
+  const rings = !p.isMoon && R > 600 && rng() < 0.45 * (p.ringMul ?? 1)
     ? { inner: rng.range(1.35, 1.6), width: rng.range(0.25, 0.7), ry: rng.range(0.18, 0.38), tilt: rng.range(-0.6, 0.6) }
     : null;
   const major = new Path2D(), minor = new Path2D();

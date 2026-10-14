@@ -1,7 +1,7 @@
 import {
   clamp, expSmooth, lexp, dailySeed, mag, sub, angleOf, fromAngle, vec, dist,
 } from './maths.js';
-import { Universe, STAR_CLASSES } from './universe.js';
+import { Universe, STAR_CLASSES, landingSpeedLimit } from './universe.js';
 import { Autopilot } from './autopilot.js';
 import { renderUniverse, drawStick } from './render.js';
 import {
@@ -38,6 +38,7 @@ function applyShip() {
   autopilot.assist = state.options.assist;
   universe.style.fancy = state.options.fancy;
   universe.style.warp = state.options.warp;
+  universe.style.strict = state.options.strict;
   const s = shipStats(state), f = universe.fuel;
   f.on = state.options.survival;
   f.capacity = s.capacity; f.burn = s.burn; f.refuelRate = s.refuelRate;
@@ -142,19 +143,25 @@ rescueBtn.addEventListener('click', () => {
   ui.toast('RESCUED: -25% credits'); persist();
 });
 
-// the player's ship was torn apart by a black hole: wake up parked on the safest planet
-universe.onConsumed = (ship) => {
-  const far = (p) => Math.min(...universe.blackHoles.map((b) => dist(b.pos, p.pos)));
+// the player's ship is lost (black hole or crash): wake up parked on the safest planet
+function respawnPlayer(message, farFrom) {
+  const far = (p) => (farFrom.length ? Math.min(...farFrom.map((b) => dist(b.pos, p.pos))) : 0);
   const planet = universe.planets.filter((p) => !p.isMoon).sort((a, b) => far(b) - far(a))[0];
-  ship.consumed = null;
+  universe.ship.consumed = null;
   state.credits = Math.floor(state.credits * 0.75);
   universe.forceLand(planet, true);
   universe.fuel.level = Math.min(universe.fuel.capacity, 20);
   universe.timeScale = 1;
   autopilot.target = null;
-  ui.toast('LOST TO THE SINGULARITY: -25% credits', 'bad');
+  ui.toast(message, 'bad');
   persist();
-};
+}
+universe.onConsumed = () => respawnPlayer('LOST TO THE SINGULARITY: -25% credits', universe.blackHoles);
+universe.onDestroyed = (ship, { planet, speed }) =>
+  respawnPlayer(`CRASHED ON ${planet.name.toUpperCase()} AT ${Math.round(speed)}: -25% credits`, []);
+universe.onImpact = ({ planet, speed, safe, damage }) =>
+  ui.toast(`HARD LANDING on ${planet.name.toUpperCase()}: ${Math.round(speed)} (limit ${Math.round(safe)})` +
+    (universe.fuel.on ? `  -${Math.round(damage)} fuel` : ''), 'bad');
 
 const canvas = document.getElementById('space');
 const ctx = canvas.getContext('2d');
@@ -257,9 +264,14 @@ function updateHud() {
 
   const closest = u.closestPlanet();
   const alt = Math.trunc(dist(closest.pos, ship.pos) - closest.radius);
+  const rel = Math.round(mag(sub(ship.velocity, closest.velocity)));
+  const safe = Math.round(landingSpeedLimit(closest));
+  const tooFast = u.style.strict && closest.collides && alt < 2500 && rel > safe;
   const first = ship.landing
     ? `LND: ${ship.landing.planet.name.toUpperCase()}\nJOB: ${ship.landing.text.toUpperCase()}`
-    : alt < 10_000 ? `ALT: ${alt}` : null;
+    : alt < 10_000
+      ? `ALT: ${alt}${closest.collides && u.style.strict && alt < 4000 ? `  REL: ${rel}/${safe}${tooFast ? '  !! TOO FAST !!' : ''}` : ''}`
+      : null;
   const f = u.fuel;
   const fuelLine = f.on
     ? `FUEL: ${Math.round((f.level / f.capacity) * 100)}%${f.heat ? '  !! HEAT !!' : f.level <= 0 ? '  EMPTY' : ''}`

@@ -34,6 +34,15 @@ export const STAR_COLORS = {
   O: '#6666ff', B: '#ccccff', A: '#eeeeff', F: '#ffffff', G: '#ffff66', K: '#ffcc33', M: '#ff8800',
 };
 
+/**
+ * Fastest speed (relative to the planet) at which you can still touch down. Big planets pull
+ * harder than the engine can resist near the surface, so they forgive more speed.
+ */
+export function landingSpeedLimit(p) {
+  const surfaceG = (GRAVITATION * SPACECRAFT_MASS * p.mass) / (p.radius * p.radius);
+  return 150 + 0.45 * surfaceG;
+}
+
 const keplerSpeed = (orbit, mass) => (PI2 * orbit) / (Math.sqrt(orbit ** 3 / mass) * KEPLER_CONSTANT);
 
 class Body {
@@ -110,21 +119,40 @@ export class BlackHole extends Star {
   }
 }
 
-/** A ring of small rocks on rails. Positions are closed-form, so they cost nothing to simulate. */
+/**
+ * A ring of rocks on rails. Positions are closed-form, so they cost nothing to simulate.
+ * Every belt rolls its own character: how thick the field is, whether it is lumpy, how big
+ * the rocks are, and whether it is denser in the middle.
+ */
 export class Belt {
-  constructor(radius, width, count, omega, rng) {
-    this.radius = radius; this.width = width; this.omega = omega; this.count = count;
+  constructor(radius, width, omega, rng) {
+    this.radius = radius; this.width = width; this.omega = omega;
+    this.spacing = rng.range(130, 520); // typical gap between rocks: small = dense field
+    this.sizeScale = rng.range(0.6, 1.7);
+    this.clumpy = rng() < 0.5 ? rng.range(0.3, 0.6) : 0; // share of rocks gathered in clumps
+    this.peaked = rng() < 0.5; // denser toward the middle of the band
+    this.maxSize = 46 * this.sizeScale;
+    // always leave gaps to fly through, even inside the thickest clumps (which are denser than the rest)
+    this.spacing = Math.max(this.spacing, (60 + 100 * this.sizeScale) * Math.sqrt(1 + 5 * this.clumpy));
+    const count = clamp(Math.round((width * PI2 * radius) / (this.spacing * this.spacing)), 600, 28_000);
+    this.count = count;
+    this.label = `${this.spacing < 200 ? 'dense' : this.spacing < 340 ? 'medium' : 'sparse'}${this.clumpy ? ', clumpy' : ''}`;
     this.phase = new Float32Array(count);
     this.r = new Float32Array(count);
     this.size = new Float32Array(count);
     this.shape = new Uint8Array(count);
     this.bins = Array.from({ length: BELT_BINS }, () => []);
+    const clumps = Array.from({ length: rng.int(2, 7) }, () => ({ at: rng() * PI2, sd: rng.range(0.03, 0.14) }));
+    const gauss = () => (rng() + rng() + rng() - 1.5) / 1.5; // roughly -1..1, bell-shaped
     for (let i = 0; i < count; i++) {
-      this.phase[i] = rng() * PI2;
-      this.r[i] = radius + (rng() - 0.5) * width;
-      this.size[i] = 6 + 40 * rng() ** 3;
+      let ph;
+      if (rng() < this.clumpy) { const c = clumps[rng.int(0, clumps.length)]; ph = c.at + gauss() * c.sd * 2; } else ph = rng() * PI2;
+      ph = ((ph % PI2) + PI2) % PI2;
+      this.phase[i] = ph;
+      this.r[i] = radius + (this.peaked ? gauss() * 0.7 : (rng() - 0.5) * 2) * (width / 2);
+      this.size[i] = (6 + 40 * rng() ** 3) * this.sizeScale;
       this.shape[i] = rng.int(0, 6);
-      this.bins[Math.floor((this.phase[i] / PI2) * BELT_BINS) % BELT_BINS].push(i);
+      this.bins[Math.floor((ph / PI2) * BELT_BINS) % BELT_BINS].push(i);
     }
   }
   angle(i, now) { return this.phase[i] + this.omega * now; }
@@ -255,9 +283,11 @@ export class Universe {
     this.latestDiscovery = null;
     // Extras (off by default so the core stays 1:1): fuel and heat.
     this.fuel = { on: false, level: 100, capacity: 100, burn: 1.6, refuelRate: 10, heat: false };
-    this.style = { fancy: true, warp: true }; // fancy trails and glow; warped gravity grid
+    this.style = { fancy: true, warp: true, strict: true }; // trails, grid warp, speed-limited landings
     this.onLanded = null; // (planet, { rescue, first }) => void
     this.onConsumed = null; // (ship) => void; the player's ship was lost to a black hole
+    this.onDestroyed = null; // (ship, { planet, speed }) => void; the player crashed
+    this.onImpact = null; // ({ planet, speed, safe, damage }) => void; a hard (survivable) landing
     this.initRandom(shipModel);
   }
 
@@ -301,15 +331,32 @@ export class Universe {
     // (except that binary / black-hole systems re-space their orbits).
     this.totalMass = this.star.mass;
     this.stars = [this.star];
+    this.profile = this.makeProfile();
+    for (const p of parents) p.ringMul = this.profile.ringMul;
     const remap = this.makeSystemType(parents, systemName);
     ship.pos = fromAngle(shipAngle, remap(shipOrbit));
 
     const pairs = this.makeBinaryPlanets(parents);
     this.planets = [...parents, ...pairs, ...this.makeMoons(parents)];
     this.belts = this.makeBelts(parents);
+    ship.pos = this.outsideBelts(ship.pos);
     this.wells = [...this.stars, ...this.blackHoles.filter((b) => !this.stars.includes(b))];
     this._bodies = [...this.planets, ...this.wells];
     this.spawnAI();
+  }
+
+  /** Each system has a character, so not every feature shows up in every system. */
+  makeProfile() {
+    const rng = makeRng((this.randomSeed ^ 0x9f0f11e) >>> 0);
+    const kinds = [
+      [20, { name: 'barren', moonChance: 0.25, ringMul: 0.3, beltChance: 0.2, pairChance: 0.15, ai: [0, 2] }],
+      [40, { name: 'ordinary', moonChance: 0.75, ringMul: 1, beltChance: 0.6, pairChance: 0.35, ai: [2, 4] }],
+      [20, { name: 'crowded', moonChance: 1, ringMul: 1.4, beltChance: 0.9, pairChance: 0.5, ai: [3, 6] }],
+      [20, { name: 'deserted', moonChance: 0.5, ringMul: 0.6, beltChance: 0.5, pairChance: 0.3, ai: [0, 0] }],
+    ];
+    let x = rng() * 100;
+    for (const [w, k] of kinds) { x -= w; if (x < 0) return k; }
+    return kinds[1][1];
   }
 
   /** Decide binary / black-hole systems and re-space planet orbits. Returns an orbit remapper. */
@@ -369,7 +416,7 @@ export class Universe {
   makeBinaryPlanets(parents) {
     const rng = makeRng((this.randomSeed ^ 0xb1a2a2) >>> 0);
     const partners = [];
-    const want = rng() < 0.35 ? rng.int(1, 3) : 0; // about a third of systems have a binary planet
+    const want = rng() < this.profile.pairChance ? rng.int(1, 3) : 0;
     for (const p of parents) {
       p.beltOrbit = p.orbitRadius;
       if (partners.length >= want || p.radius < 300 || rng() > 0.5) continue;
@@ -406,7 +453,8 @@ export class Universe {
     const moons = [];
     for (const parent of parents) {
       if (parent.radius < 450 || parent.binary) continue;
-      const count = Math.min(3, rng.int(0, 2 + Math.floor(parent.radius / 600)));
+      const roll = Math.min(3, rng.int(0, 2 + Math.floor(parent.radius / 600)));
+      const count = rng() < this.profile.moonChance ? roll : 0;
       let orbit = parent.radius * rng.range(2.3, 2.9);
       for (let i = 0; i < count; i++) {
         const radius = Math.max(30, parent.radius * rng.range(0.06, 0.22));
@@ -433,16 +481,14 @@ export class Universe {
     const gaps = [];
     for (let i = 0; i + 1 < edges.length; i++) if (edges[i + 1] - edges[i] >= 9000) gaps.push([edges[i], edges[i + 1]]);
     const belts = [];
-    const want = rng.int(0, 3);
+    const want = rng() < this.profile.beltChance ? rng.int(1, 3) : 0;
     for (let i = 0; i < want && gaps.length; i++) {
       const [lo, hi] = gaps.splice(rng.int(0, gaps.length), 1)[0];
       const gap = hi - lo;
       const radius = (lo + hi) / 2 + (rng() - 0.5) * gap * 0.1;
       const width = Math.min(gap * 0.45, rng.range(3000, 7000));
       const omega = PI2 / (Math.sqrt(radius ** 3 / this.totalMass) * KEPLER_CONSTANT);
-      // roughly one rock per 240x240 units, so a belt reads as a field rather than a few stones
-      const count = clamp(Math.round((width * PI2 * radius) / (240 * 240)), 2000, 20_000);
-      belts.push(new Belt(radius, width, count, omega, rng));
+      belts.push(new Belt(radius, width, omega, rng));
     }
     return belts;
   }
@@ -450,7 +496,7 @@ export class Universe {
   spawnAI() {
     const rng = makeRng((this.randomSeed ^ 0xa11ce) >>> 0);
     this.aiRng = rng;
-    const n = rng.int(2, 5);
+    const n = rng.int(this.profile.ai[0], this.profile.ai[1] + 1);
     for (let i = 0; i < n; i++) {
       const ship = new Spacecraft(randomDesign(rng));
       const { callsign, role } = makeCallsign(rng);
@@ -465,11 +511,20 @@ export class Universe {
     }
   }
 
+  /** Nudge a point out of any belt (nobody should spawn inside a rock field). */
+  outsideBelts(pos) {
+    const r = mag(pos);
+    for (const b of this.belts) {
+      if (Math.abs(r - b.radius) < b.width / 2 + 600) return fromAngle(angleOf(pos), b.radius + b.width / 2 + 900);
+    }
+    return pos;
+  }
+
   /** A random point in the orbit band that is not near a black hole. */
   safeSpot(rng) {
     for (let i = 0; i < 20; i++) {
       const p = fromAngle(rng() * PI2, rng.range(this.minOrbit, PLANET_ORBIT_RANGE[1]));
-      if (this.blackHoles.every((b) => dist(b.pos, p) > b.radius * 30)) return p;
+      if (this.blackHoles.every((b) => dist(b.pos, p) > b.radius * 30)) return this.outsideBelts(p);
     }
     return fromAngle(0, PLANET_ORBIT_RANGE[1]);
   }
@@ -631,13 +686,21 @@ export class Universe {
           const d = dist(ship.pos, planet.pos) - ship.radius - planet.radius;
           const a = angleOf(sub(ship.pos, planet.pos));
           if (d < 0) {
-            // landing or impact? Heading must be within 45 degrees of straight up.
-            // (No angle wrap here; same as the original.)
-            if (Math.abs(ship.angle - a) < Math.PI / 4) {
+            // Landing needs the nose pointing away from the ground (within 45 degrees; no angle
+            // wrap, same as the original) and, in strict mode, a low enough speed relative to the
+            // planet. Too fast: you bounce and take damage; much too fast: the ship is destroyed.
+            const vRel = mag(sub(ship.velocity, planet.velocity));
+            const safe = landingSpeedLimit(planet);
+            const strict = this.style.strict;
+            const headingOk = Math.abs(ship.angle - a) < Math.PI / 4;
+            if (strict && vRel > safe * 4 + 400) {
+              this.destroyShip(ship, planet, vRel);
+            } else if (headingOk && (!strict || vRel <= safe)) {
               this.beginLanding(ship, planet, a);
             } else {
               const impact = add(planet.pos, fromAngle(a, planet.radius));
               ship.pos = add(planet.pos, fromAngle(a, planet.radius + ship.radius - d));
+              if (strict && vRel > safe && ship.hitCooldown <= 0) this.hardImpact(ship, planet, vRel, safe);
               for (let i = 0; i < 10 && this.sparks.length < MAX_SPARKS; i++) {
                 const s = new Spark({ ttl: this.rng.range(0.5, 2), style: 'dot', color: '#fff', size: 1 });
                 s.pos = add(impact, fromAngle(this.rng.range(0, PI2), this.rng.range(0.1, 0.5)));
@@ -650,7 +713,7 @@ export class Universe {
           }
         }
       }
-      this.collideBelts(ship);
+      this.collideBelts(ship, dt);
     }
     for (const l of this.landings) l.solve(this, dt);
     // ringfence
@@ -661,38 +724,76 @@ export class Universe {
     }
   }
 
-  // Rocks are pushed out of the way positionally, which gives a natural bounce.
-  collideBelts(ship) {
-    if (ship.landing || !this.belts.length) return;
-    const rs = mag(ship.pos);
+  // a hard but survivable landing: bounce, shake, and (player, survival mode) lose some fuel
+  hardImpact(ship, planet, speed, safe) {
+    ship.hitCooldown = 0.6;
+    const damage = Math.min(12, (speed - safe) / 80);
+    if (!ship.isAI && this.fuel.on) this.fuel.level = Math.max(0, this.fuel.level - damage);
+    if (!ship.isAI && this.onImpact) this.onImpact({ planet, speed, safe, damage });
+  }
+
+  destroyShip(ship, planet, speed) {
+    const at = ship.pos;
+    for (let k = 0; k < 30 && this.sparks.length < MAX_SPARKS; k++) {
+      const s = new Spark({ ttl: this.rng.range(0.6, 2.2), style: 'dot', color: '#ffb060', size: 1.5 });
+      s.pos = s.opos = at;
+      s.velocity = add(planet.velocity, fromAngle(this.rng.range(0, PI2), this.rng.range(50, 500)));
+      this.sparks.push(s);
+    }
+    if (ship.isAI) this.respawnAI(ship);
+    else if (this.onDestroyed) this.onDestroyed(ship, { planet, speed });
+    else ship.velocity = vec();
+  }
+
+  /** Call fn(x, y, size, belt, index) for every belt rock within `range` of `pos`. */
+  forRocksNear(pos, range, fn) {
+    if (!this.belts.length) return;
+    const rs = mag(pos);
     for (const belt of this.belts) {
-      if (Math.abs(rs - belt.radius) > belt.width / 2 + 120) continue;
-      const local = (((angleOf(ship.pos) - belt.omega * this.now) % PI2) + PI2) % PI2;
-      const margin = (46 + ship.radius + 12) / rs;
+      if (Math.abs(rs - belt.radius) > belt.width / 2 + range + belt.maxSize) continue;
+      const local = (((angleOf(pos) - belt.omega * this.now) % PI2) + PI2) % PI2;
+      const margin = (range + belt.maxSize) / Math.max(rs, 1);
       const b0 = Math.floor(((local - margin) / PI2) * BELT_BINS);
       const b1 = Math.floor(((local + margin) / PI2) * BELT_BINS);
       for (let b = b0; b <= b1; b++) {
         for (const i of belt.bins[((b % BELT_BINS) + BELT_BINS) % BELT_BINS]) {
           const a = belt.angle(i, this.now), r = belt.r[i];
-          const rx = Math.cos(a) * r, ry = Math.sin(a) * r;
-          const dx = ship.pos.x - rx, dy = ship.pos.y - ry;
-          const need = belt.size[i] + ship.radius;
-          const d2 = dx * dx + dy * dy;
-          if (d2 >= need * need) continue;
-          const d = Math.sqrt(d2) || 1;
-          ship.pos = vec(rx + (dx / d) * need, ry + (dy / d) * need);
-          if (ship.hitCooldown <= 0) {
-            ship.hitCooldown = 0.4;
-            if (!ship.isAI && this.fuel.on) this.fuel.level = Math.max(0, this.fuel.level - 3);
-            for (let k = 0; k < 5 && this.sparks.length < MAX_SPARKS; k++) {
-              const s = new Spark({ ttl: this.rng.range(0.4, 1.2), style: 'dot', color: '#fff', size: 1 });
-              s.pos = s.opos = vec(rx + (dx / d) * belt.size[i], ry + (dy / d) * belt.size[i]);
-              s.velocity = add(mul(ship.velocity, 0.5), fromAngle(this.rng.range(0, PI2), this.rng.range(20, 80)));
-              this.sparks.push(s);
-            }
-          }
+          fn(Math.cos(a) * r, Math.sin(a) * r, belt.size[i], belt, i);
         }
       }
     }
+  }
+
+  // Rocks are pushed out of the way and the ship bounces off them (so it never gets glued to one).
+  collideBelts(ship, dt) {
+    if (ship.landing || !this.belts.length) return;
+    this.forRocksNear(ship.pos, ship.radius + 12, (rx, ry, size, belt, i) => {
+      const dx = ship.pos.x - rx, dy = ship.pos.y - ry;
+      const need = size + ship.radius;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= need * need) return;
+      const d = Math.sqrt(d2) || 1;
+      const nx = dx / d, ny = dy / d;
+      ship.pos = vec(rx + nx * need, ry + ny * need);
+      // bounce: reflect the velocity relative to the rock (restitution 0.4), then re-encode it in
+      // opos because velocities are rebuilt from positions after the constraints
+      const a = belt.angle(i, this.now), spin = belt.omega * belt.r[i];
+      const rock = vec(-Math.sin(a) * spin, Math.cos(a) * spin);
+      const rel = sub(ship.velocity, rock);
+      const into = rel.x * nx + rel.y * ny;
+      if (into < 0 && dt > 0) {
+        const v = add(rock, sub(rel, mul(vec(nx, ny), 1.4 * into)));
+        ship.opos = sub(ship.pos, mul(v, dt));
+      }
+      if (ship.hitCooldown > 0) return;
+      ship.hitCooldown = 0.4;
+      if (!ship.isAI && this.fuel.on) this.fuel.level = Math.max(0, this.fuel.level - 1);
+      for (let k = 0; k < 5 && this.sparks.length < MAX_SPARKS; k++) {
+        const s = new Spark({ ttl: this.rng.range(0.4, 1.2), style: 'dot', color: '#fff', size: 1 });
+        s.pos = s.opos = vec(rx + nx * size, ry + ny * size);
+        s.velocity = add(mul(ship.velocity, 0.5), fromAngle(this.rng.range(0, PI2), this.rng.range(20, 80)));
+        this.sparks.push(s);
+      }
+    });
   }
 }
