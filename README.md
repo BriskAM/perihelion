@@ -16,6 +16,14 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
 - Missions (survey, visit, voyage) that come from the seed, so a shared link means shared jobs.
 - Optional survival layer: fuel, refuelling on landing, and a star-corona heat hazard.
 - Ship upgrades bought with credits; ranks as you discover more planets.
+- Procedural planet art (banded gas giants with storms, craters, cracks, continents, swirls),
+  lumpy asteroids and ringed planets, all generated from each planet's own seed.
+- Moons: bigger planets get up to three moons on their own orbits. You can land on them.
+- Procedural ship hulls (reroll yours in the menu) and fading, speed-coloured trails with engine glow.
+- AI ships with their own hulls and callsigns that fly between planets and land.
+- Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
+  steers around the star, and hands control back when you grab the stick (it re-locks a moment
+  after you let go). Turn it off in the menu for the classic instant autopilot.
 
 ## Credits
 Inspired by the space Easter egg in Android. This project contains no Google code, art or text:

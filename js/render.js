@@ -1,7 +1,9 @@
-import { PI2, lerp, mag, sub, dist, makeRng } from './maths.js';
+import { PI2, lerp, mag, sub, dist } from './maths.js';
 import {
-  GRAVITATION, SPACECRAFT_MASS, UNIVERSE_RANGE,
+  GRAVITATION, SPACECRAFT_MASS, UNIVERSE_RANGE, CRAFT_SPEED_LIMIT,
 } from './universe.js';
+import { drawPlanetBody } from './planetart.js';
+import { drawShip } from './ships.js';
 
 export const COLORS = {
   void: '#16161d',
@@ -39,56 +41,6 @@ function roundedClosedPath(ctx, pts) {
   ctx.closePath();
 }
 
-// Procedural surface texture, seeded by the planet. Drawn in unit-radius space.
-function textureOps(seed) {
-  const rng = makeRng(seed);
-  const kind = seed % 3;
-  const ops = [];
-  if (kind === 0) { // bands
-    const n = 5 + rng.int(0, 8);
-    for (let i = 0; i < n; i++) {
-      const y = -0.9 + (1.8 * (i + rng())) / n;
-      ops.push({ t: 'band', y, amp: rng.range(0.01, 0.06), f: rng.range(2, 6), ph: rng() * PI2 });
-    }
-  } else if (kind === 1) { // craters
-    const n = 8 + rng.int(0, 18);
-    for (let i = 0; i < n; i++) {
-      const a = rng() * PI2, d = Math.sqrt(rng()) * 0.9;
-      ops.push({ t: 'circle', x: Math.cos(a) * d, y: Math.sin(a) * d, r: rng.range(0.04, 0.2) });
-    }
-  } else { // contours
-    const n = 4 + rng.int(0, 5), ox = rng.range(-0.25, 0.25), oy = rng.range(-0.25, 0.25);
-    for (let i = 1; i <= n; i++) ops.push({ t: 'circle', x: ox * (i / n), y: oy * (i / n), r: i / n * 0.95 });
-  }
-  return ops;
-}
-
-function drawTexture(ctx, planet, px) {
-  planet.tex ??= textureOps(planet.seed);
-  const R = planet.radius;
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, R, 0, PI2);
-  ctx.clip();
-  ctx.lineWidth = px;
-  ctx.strokeStyle = planet.color;
-  ctx.beginPath();
-  for (const o of planet.tex) {
-    if (o.t === 'circle') {
-      ctx.moveTo((o.x + o.r) * R, o.y * R);
-      ctx.arc(o.x * R, o.y * R, o.r * R, 0, PI2);
-    } else {
-      for (let i = 0; i <= 48; i++) {
-        const x = -1 + (2 * i) / 48;
-        const y = o.y + Math.sin(x * o.f * Math.PI + o.ph) * o.amp;
-        if (i === 0) ctx.moveTo(x * R, y * R); else ctx.lineTo(x * R, y * R);
-      }
-    }
-  }
-  ctx.stroke();
-  ctx.restore();
-}
-
 function gravitationalField(ctx, body, now, px) {
   const rings = 10;
   for (let i = 0; i < rings; i++) {
@@ -107,24 +59,13 @@ function drawPlanet(ctx, p, u, zoom, px) {
   ctx.strokeStyle = COLORS.orbit;
   ctx.lineWidth = px;
   ctx.beginPath();
-  ctx.arc(p.orbitCenter.x, p.orbitCenter.y, p.orbitRadius, 0, PI2);
+  const c = p.orbitCenter;
+  ctx.arc(c.x, c.y, p.orbitRadius, 0, PI2);
   ctx.stroke();
 
   gravitationalField(ctx, p, u.now, px);
-
-  ctx.save();
-  ctx.translate(p.pos.x, p.pos.y);
-  ctx.fillStyle = COLORS.void;
-  ctx.beginPath();
-  ctx.arc(0, 0, p.radius, 0, PI2);
-  ctx.fill();
-  if (p.explored && zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000) drawTexture(ctx, p, px);
-  ctx.strokeStyle = drawColor;
-  ctx.lineWidth = 2 * px;
-  ctx.beginPath();
-  ctx.arc(0, 0, p.radius, 0, PI2);
-  ctx.stroke();
-  ctx.restore();
+  const showTex = p.explored && zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
+  drawPlanetBody(ctx, p, px, showTex, drawColor, COLORS.void);
 }
 
 function drawStar(ctx, star, now, px) {
@@ -155,6 +96,14 @@ function drawSpark(ctx, s, px) {
     ctx.beginPath();
     ctx.arc(s.pos.x, s.pos.y, s.size, 0, PI2);
     ctx.fill();
+  } else if (s.style === 'glow') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = `rgba(${s.color},${0.55 * (1 - life)})`;
+    ctx.beginPath();
+    ctx.arc(s.pos.x, s.pos.y, s.size * (1 + life), 0, PI2);
+    ctx.fill();
+    ctx.restore();
   } else if (s.style === 'ring') {
     ctx.globalAlpha = 1 - life;
     ctx.lineWidth = px;
@@ -165,43 +114,61 @@ function drawSpark(ctx, s, px) {
   }
 }
 
-function drawSpacecraft(ctx, ship, px) {
+function drawTrail(ctx, ship, fancy, px) {
+  const t = ship.track;
+  if (t.length < 2) return;
+  if (!fancy) { // classic: consecutive pairs, so it reads as dashes
+    ctx.strokeStyle = COLORS.track;
+    ctx.lineWidth = px;
+    ctx.beginPath();
+    for (let i = 0; i + 1 < t.length; i += 2) {
+      ctx.moveTo(t[i].x, t[i].y);
+      ctx.lineTo(t[i + 1].x, t[i + 1].y);
+    }
+    ctx.stroke();
+    return;
+  }
+  // fancy: a fading, tapering line coloured by speed (or by hull colour for other ships)
+  const B = ship.isAI ? 5 : 9;
+  const per = Math.ceil(t.length / B);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let b = 0; b < B; b++) {
+    const from = Math.max(0, b * per - 1), to = Math.min(t.length, (b + 1) * per);
+    if (to - from < 2) continue;
+    const f = (b + 1) / B;
+    const v = t[to - 1].v;
+    const hue = ship.isAI ? ship.design.hue : 140 + 150 * Math.min(1, v / CRAFT_SPEED_LIMIT);
+    ctx.strokeStyle = `hsla(${hue},70%,${55 + 20 * f}%,${(ship.isAI ? 0.5 : 0.8) * f * f})`;
+    ctx.lineWidth = px * (0.6 + 1.6 * f);
+    ctx.beginPath();
+    ctx.moveTo(t[from].x, t[from].y);
+    for (let i = from + 1; i < to; i++) ctx.lineTo(t[i].x, t[i].y);
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+}
+
+function drawSpacecraft(ctx, ship, px, now, fancy, zoom) {
+  drawTrail(ctx, ship, fancy, px);
   ctx.save();
   ctx.translate(ship.pos.x, ship.pos.y);
   ctx.rotate(ship.angle);
-  ctx.lineWidth = 2 * px;
-  ctx.lineJoin = 'round';
-  if (ship.landing) {
-    ctx.strokeStyle = '#ccc';
-    ctx.beginPath();
-    ctx.moveTo(-3, -4); ctx.lineTo(-11, -10);
-    ctx.moveTo(-3, 4); ctx.lineTo(-11, 10);
-    ctx.stroke();
-  }
-  ctx.beginPath();
-  ctx.moveTo(12, 0); ctx.lineTo(-6, -7); ctx.lineTo(-3, 0); ctx.lineTo(-6, 7); ctx.closePath();
-  ctx.fillStyle = COLORS.void;
-  ctx.fill();
-  ctx.strokeStyle = ship.transit ? '#000' : '#fff';
-  ctx.stroke();
-  if (mag(ship.thrust) > 0) {
-    ctx.strokeStyle = '#ff8800';
-    ctx.beginPath();
-    ctx.moveTo(-4, -3); ctx.lineTo(-11, 0); ctx.lineTo(-4, 3);
-    ctx.stroke();
-  }
+  drawShip(ctx, ship.design, {
+    thrust: ship.effThrust ?? mag(ship.thrust), now, px, transit: ship.transit,
+    landed: !!ship.landing, fancy, void: COLORS.void,
+  });
   ctx.restore();
-
-  // trail: consecutive pairs, so it reads as dashes
-  ctx.strokeStyle = COLORS.track;
-  ctx.lineWidth = px;
-  ctx.beginPath();
-  const t = ship.track;
-  for (let i = 0; i + 1 < t.length; i += 2) {
-    ctx.moveTo(t[i].x, t[i].y);
-    ctx.lineTo(t[i + 1].x, t[i + 1].y);
+  if (ship.isAI && zoom > 0.25) { // callsign tag
+    ctx.save();
+    ctx.translate(ship.pos.x, ship.pos.y);
+    ctx.scale(px, px);
+    ctx.fillStyle = 'rgba(183,183,255,0.7)';
+    ctx.font = '10px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(ship.name, 0, 28);
+    ctx.restore();
   }
-  ctx.stroke();
 }
 
 function drawAutopilot(ctx, ap, now, px) {
@@ -228,6 +195,25 @@ function drawAutopilot(ctx, ap, now, px) {
   ctx.arc(0, 0, target.radius + ap.landingAltitude / 2, 0, PI2);
   ctx.stroke();
   ctx.restore();
+  if (ap.assist && ap.strategy === 'ACQUIRING') { // lock-on reticle
+    ctx.save();
+    ctx.translate(target.pos.x, target.pos.y);
+    const r = target.radius + 30 * px + (1 - ap.lock) * 60 * px;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 2 * px;
+    ctx.rotate(now * 2);
+    for (let k = 0; k < 4; k++) {
+      ctx.beginPath();
+      ctx.arc(0, 0, r, (k * Math.PI) / 2 + 0.15, ((k + 1) * Math.PI) / 2 - 0.15);
+      ctx.stroke();
+    }
+    ctx.rotate(-now * 2);
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 8 * px, -Math.PI / 2, -Math.PI / 2 + ap.lock * PI2);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.globalAlpha = 0.5;
   ctx.lineWidth = px;
   ctx.beginPath();
@@ -285,7 +271,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
     ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
   }
 
-  for (const l of u.landings) drawLanding(ctx, l, px);
+  for (const l of u.landings) if (l.player) drawLanding(ctx, l, px);
 
   // ringfence
   ctx.strokeStyle = '#800000';
@@ -300,7 +286,9 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
   for (const sp of u.sparks) drawSpark(ctx, sp, px);
   for (const p of u.planets) drawPlanet(ctx, p, u, zoom, px);
   if (u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
-  drawSpacecraft(ctx, u.ship, px);
+  const fancy = u.style.fancy;
+  for (const s of u.ships) if (s !== u.ship) drawSpacecraft(ctx, s, px, u.now, fancy, zoom);
+  drawSpacecraft(ctx, u.ship, px, u.now, fancy, zoom);
 }
 
 export function drawStick(ctx, stick, dpr) {

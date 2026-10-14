@@ -99,6 +99,11 @@ export function createUI({ state, universe, missions, seed, actions }) {
     if (!state.options.survival) {
       body.append(el('p', 'dim', 'Survival (fuel and heat) is off, so upgrades have no effect.'));
     }
+    const hull = el('div', 'card');
+    hull.append(el('div', 'title', `Hull design #${state.shipSeed}`),
+      el('div', 'dim', 'Your ship\u2019s shape is generated from this number.'));
+    hull.append(button('REROLL HULL', actions.reroll));
+    body.append(hull);
     for (const [id, u] of Object.entries(UPGRADES)) {
       const lvl = state.upgrades[id];
       const maxed = lvl >= MAX_UPGRADE;
@@ -121,6 +126,8 @@ export function createUI({ state, universe, missions, seed, actions }) {
     };
     toggleRow('survival', 'Survival', 'Fuel burns when you thrust; the star corona burns it faster. Refuel by landing.');
     toggleRow('missions', 'Missions', 'Three jobs per system, paid in credits.');
+    toggleRow('assist', 'Assisted autopilot', 'Takes time to lock on, turns at a limited rate, and hands control back when you grab the stick. Off = classic instant autopilot.');
+    toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');
     card.append(el('div', 'title', `Seed ${seed}`), el('div', 'dim', 'Share this system with a friend.'));

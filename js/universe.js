@@ -2,6 +2,8 @@ import {
   PI2, lerp, vec, add, sub, mul, mag, angleOf, dist, fromAngle, makeRng, hsvToCss,
 } from './maths.js';
 import { Namer } from './namer.js';
+import { makeDesign, makeCallsign } from './ships.js';
+import { Autopilot } from './autopilot.js';
 
 export const UNIVERSE_RANGE = 200_000;
 export const NUM_PLANETS_RANGE = [1, 10];
@@ -20,6 +22,8 @@ export const LAUNCH_MECO = 2; // seconds of no gravity after launch
 export const LANDING_REMOVAL_TIME = 60 * 15;
 export const MAX_VALID_DT = 1;
 export const TRACK_LENGTH = 10_000;
+const AI_TRACK_LENGTH = 400;
+const MAX_SPARKS = 700;
 
 export const STAR_CLASSES = ['O', 'B', 'A', 'F', 'G', 'K', 'M'];
 export const STAR_COLORS = {
@@ -44,9 +48,11 @@ class Body {
 }
 
 export class Planet extends Body {
-  constructor(orbitCenter, radius, pos, speed, color = '#fff') {
+  constructor(orbitCenter, radius, pos, speed, color = '#fff', parent = null) {
     super();
-    this.orbitCenter = orbitCenter;
+    this.parent = parent; // set for moons: they orbit their planet
+    this.isMoon = !!parent;
+    this._center = orbitCenter;
     this.radius = radius;
     this.pos = pos;
     this.speed = speed;
@@ -55,15 +61,17 @@ export class Planet extends Body {
     this.explored = false;
     this.orbitRadius = dist(pos, orbitCenter);
     this.mass = (4 / 3) * Math.PI * radius ** 3 * PLANETARY_DENSITY;
-    this.seed = Math.floor(radius * 1000) >>> 0; // drives its surface texture
+    this.seed = Math.floor(radius * 1000) >>> 0; // drives its look
   }
+  get orbitCenter() { return this.parent ? this.parent.pos : this._center; }
   update(sim, dt) {
     const a = angleOf(sub(this.pos, this.orbitCenter));
-    this.velocity = fromAngle(a + Math.PI / 2, this.speed); // constant linear velocity
+    const tangential = fromAngle(a + Math.PI / 2, this.speed); // constant linear velocity
+    this.velocity = this.parent ? add(this.parent.velocity, tangential) : tangential;
     super.update(sim, dt);
   }
   postUpdate(sim, dt) {
-    // pin to the orbit, like a constraint
+    // pin to the orbit, like a constraint (parents are post-updated before their moons)
     const a = angleOf(sub(this.pos, this.orbitCenter));
     this.pos = add(this.orbitCenter, fromAngle(a, this.orbitRadius));
     super.postUpdate(sim, dt);
@@ -94,8 +102,8 @@ export class Spark extends Body {
 }
 
 export class Landing {
-  constructor(ship, planet, angle, text) {
-    this.ship = ship; this.planet = planet; this.angle = angle; this.text = text;
+  constructor(ship, planet, angle, text, player = true) {
+    this.ship = ship; this.planet = planet; this.angle = angle; this.text = text; this.player = player;
     this.life = LANDING_REMOVAL_TIME;
   }
   solve(sim, dt) {
@@ -111,23 +119,27 @@ export class Landing {
 }
 
 export class Spacecraft extends Body {
-  constructor() {
+  constructor(design) {
     super('Ship');
+    this.design = design;
     this.thrust = vec();
     this.launchClock = 0;
     this.transit = false;
     this.track = [];
+    this.trackMax = TRACK_LENGTH;
     this.landing = null;
     this.autopilot = null;
+    this.isAI = false;
     this.mass = SPACECRAFT_MASS;
     this.radius = 12;
   }
   update(sim, dt) {
     const f = sim.fuel;
-    // Optional survival layer: an empty tank means no thrust; thrusting burns fuel.
-    const dry = f.on && f.level <= 0;
+    // Optional survival layer (player only): an empty tank means no thrust; thrusting burns fuel.
+    const useFuel = f.on && !this.isAI;
+    const dry = useFuel && f.level <= 0;
     const thrustMag = dry ? 0 : mag(this.thrust);
-    if (f.on && thrustMag > 0 && !this.landing) {
+    if (useFuel && thrustMag > 0 && !this.landing) {
       f.level = Math.max(0, f.level - Math.min(1, thrustMag) * f.burn * dt);
     }
     if (thrustMag > 0) {
@@ -145,6 +157,7 @@ export class Spacecraft extends Body {
     } else if (this.launchClock !== 0) {
       this.launchClock = 0;
     }
+    this.effThrust = thrustMag;
     if (mag(this.velocity) > CRAFT_SPEED_LIMIT) {
       this.velocity = fromAngle(angleOf(this.velocity), CRAFT_SPEED_LIMIT);
     }
@@ -152,68 +165,52 @@ export class Spacecraft extends Body {
   }
   postUpdate(sim, dt) {
     super.postUpdate(sim, dt);
-    // pairs of points: the trail renders as dashes, as in the original
-    this.track.push(this.pos);
-    if (this.track.length >= TRACK_LENGTH - 1) this.track.splice(0, 2);
+    // trail points; the classic style draws them in pairs (dashes), the fancy one as a fading line
+    this.track.push({ x: this.pos.x, y: this.pos.y, v: mag(this.velocity) });
+    if (this.track.length >= this.trackMax - 1) this.track.splice(0, 2);
 
-    const m = mag(this.thrust);
-    if (sim.rng() < m) {
-      const s = new Spark({
-        ttl: sim.rng.range(0.5, 1), collides: true, mass: 1, style: 'ring', size: 1,
-        color: 'rgba(255,255,255,0.25)',
-      });
-      s.pos = this.pos; s.opos = this.pos;
-      s.velocity = add(this.velocity,
-        fromAngle(this.angle + sim.rng.range(-0.2, 0.2), -MAIN_ENGINE_ACCEL * m * 10 * dt));
-      sim.sparks.push(s);
+    const m = this.effThrust ?? mag(this.thrust);
+    if (sim.sparks.length < MAX_SPARKS && sim.rng() < m) {
+      const back = fromAngle(this.angle + sim.rng.range(-0.2, 0.2), -MAIN_ENGINE_ACCEL * m * 10 * dt);
+      const mk = (opts) => {
+        const s = new Spark(opts);
+        s.pos = this.pos; s.opos = this.pos; s.velocity = add(this.velocity, back);
+        sim.sparks.push(s);
+      };
+      mk({ ttl: sim.rng.range(0.5, 1), collides: true, mass: 1, style: 'ring', size: 1, color: 'rgba(255,255,255,0.25)' });
+      if (sim.style.fancy) {
+        mk({ ttl: sim.rng.range(0.25, 0.6), style: 'glow', size: 2 + 2 * m, color: '255,150,40' });
+      }
     }
   }
 }
 
 export class Universe {
-  constructor(seed) {
+  constructor(seed, { shipSeed = 1 } = {}) {
     this.randomSeed = seed;
     this.rng = makeRng(seed);
     this.namer = new Namer();
     this.now = 0; this.dt = 0; this._wall = 0;
-    this.planets = [];
+    this.planets = []; // planets first (sorted by orbit), then their moons
     this.sparks = [];
     this.landings = [];
-    this.entities = []; // extra updaters (autopilot)
+    this.entities = []; // updaters (autopilots)
+    this.ships = [];
     this.latestDiscovery = null;
     // Extras (off by default so the core stays 1:1): fuel and heat.
     this.fuel = { on: false, level: 100, capacity: 100, burn: 1.6, refuelRate: 10, heat: false };
-    this.onLanded = null; // (planet, { rescue }) => void
-    this.initRandom();
+    this.style = { fancy: true }; // fancy trails and engine glow
+    this.onLanded = null; // (planet, { rescue, first }) => void
+    this.initRandom(shipSeed);
   }
 
-  // Put the ship down on `planet` right where it is (used by the rescue button).
-  forceLand(planet, rescue = false) {
-    const ship = this.ship;
-    const a = angleOf(sub(ship.pos, planet.pos));
-    ship.pos = add(planet.pos, fromAngle(a, planet.radius + ship.radius));
-    ship.angle = a;
-    this.beginLanding(planet, a, rescue);
-  }
-
-  beginLanding(planet, a, rescue = false) {
-    const ship = this.ship;
-    const landing = new Landing(ship, planet, a, this.namer.describeActivity(this.rng, planet));
-    ship.landing = landing;
-    ship.velocity = planet.velocity;
-    this.landings.push(landing);
-    const first = !planet.explored;
-    planet.explored = true;
-    this.latestDiscovery = planet;
-    if (this.onLanded) this.onLanded(planet, { rescue, first });
-  }
-
-  initRandom() {
+  initRandom(shipSeed) {
     const rng = this.rng;
     const systemName = this.namer.nameSystem(rng);
     this.star = new Star(rng.choose(STAR_CLASSES), rng.range(...STAR_RADIUS_RANGE));
     this.star.name = systemName;
     const n = rng.int(NUM_PLANETS_RANGE[0], NUM_PLANETS_RANGE[1] + 1);
+    const parents = [];
     for (let i = 0; i < n; i++) {
       const radius = rng.range(...PLANET_RADIUS_RANGE);
       const orbitRadius = lerp(PLANET_ORBIT_RANGE[0], PLANET_ORBIT_RANGE[1], rng());
@@ -226,24 +223,96 @@ export class Universe {
       p.atmosphere = this.namer.describeAtmo(rng);
       p.flora = this.namer.describeLife(rng);
       p.fauna = this.namer.describeLife(rng);
-      this.planets.push(p);
+      parents.push(p);
     }
-    this.planets.sort((a, b) => dist(a.pos, this.star.pos) - dist(b.pos, this.star.pos));
-    this.planets.forEach((p, i) => { p.name = `${systemName} ${i + 1}`; });
+    parents.sort((a, b) => dist(a.pos, this.star.pos) - dist(b.pos, this.star.pos));
+    parents.forEach((p, i) => { p.name = `${systemName} ${i + 1}`; });
 
-    const ship = new Spacecraft();
+    const ship = new Spacecraft(makeDesign(shipSeed));
+    ship.name = 'You';
     ship.pos = add(this.star.pos, fromAngle(rng() * PI2, rng.range(...PLANET_ORBIT_RANGE)));
     ship.angle = rng() * PI2;
     this.ship = ship;
     this.follow = ship;
+    this.ships.push(ship);
+
+    // everything below uses its own RNG streams, so the planets above never change
+    this.planets = [...parents, ...this.makeMoons(parents)];
+    this.spawnAI();
+  }
+
+  makeMoons(parents) {
+    const rng = makeRng((this.randomSeed ^ 0x6d6f6f6e) >>> 0);
+    const moons = [];
+    for (const parent of parents) {
+      if (parent.radius < 450) continue;
+      const count = Math.min(3, rng.int(0, 2 + Math.floor(parent.radius / 600)));
+      let orbit = parent.radius * rng.range(2.3, 2.9);
+      for (let i = 0; i < count; i++) {
+        const radius = Math.max(30, parent.radius * rng.range(0.06, 0.22));
+        const period = Math.sqrt(orbit ** 3 / parent.mass) * KEPLER_CONSTANT;
+        const m = new Planet(
+          parent.pos, radius, add(parent.pos, fromAngle(rng() * PI2, orbit)), (PI2 * orbit) / period,
+          hsvToCss((radius * 7) % 360, 0.45, 0.95), parent);
+        m.name = `${parent.name}${'abc'[i]}`;
+        m.description = `${this.namer.planetTable.roll(rng).pull(rng)} moon`;
+        m.atmosphere = this.namer.describeAtmo(rng);
+        m.flora = this.namer.describeLife(rng);
+        m.fauna = this.namer.describeLife(rng);
+        moons.push(m);
+        orbit += parent.radius * rng.range(1.0, 1.6) + radius * 2;
+      }
+    }
+    return moons;
+  }
+
+  spawnAI() {
+    const rng = makeRng((this.randomSeed ^ 0xa11ce) >>> 0);
+    this.aiRng = rng;
+    const n = rng.int(2, 5);
+    for (let i = 0; i < n; i++) {
+      const ship = new Spacecraft(makeDesign(rng.int(1, 1e9)));
+      const { callsign, role } = makeCallsign(rng);
+      ship.name = callsign; ship.role = role; ship.isAI = true; ship.trackMax = AI_TRACK_LENGTH;
+      ship.pos = add(this.star.pos, fromAngle(rng() * PI2, rng.range(...PLANET_ORBIT_RANGE)));
+      ship.angle = rng() * PI2;
+      const ap = new Autopilot(ship, this, { ai: true, rng });
+      ap.enabled = true;
+      ship.autopilot = ap;
+      this.entities.push(ap);
+      this.ships.push(ship);
+    }
+  }
+
+  // Put the player's ship down on `planet` right where it is (used by the rescue button).
+  forceLand(planet, rescue = false) {
+    const ship = this.ship;
+    const a = angleOf(sub(ship.pos, planet.pos));
+    ship.pos = add(planet.pos, fromAngle(a, planet.radius + ship.radius));
+    ship.angle = a;
+    this.beginLanding(ship, planet, a, rescue);
+  }
+
+  beginLanding(ship, planet, a, rescue = false) {
+    const player = ship === this.ship;
+    const text = this.namer.describeActivity(this.rng, planet);
+    const landing = new Landing(ship, planet, a, text, player);
+    ship.landing = landing;
+    ship.velocity = planet.velocity;
+    this.landings.push(landing);
+    if (!player) return;
+    const first = !planet.explored;
+    planet.explored = true;
+    this.latestDiscovery = planet;
+    if (this.onLanded) this.onLanded(planet, { rescue, first });
   }
 
   get bodies() { return [...this.planets, this.star]; }
 
-  closestPlanet() {
+  closestPlanet(ship = this.ship) {
     let best = null, bd = Infinity;
     for (const b of this.bodies) {
-      const d = dist(b.pos, this.ship.pos);
+      const d = dist(b.pos, ship.pos);
       if (d < bd) { bd = d; best = b; }
     }
     return best;
@@ -260,7 +329,6 @@ export class Universe {
 
     // 1. integrate
     const ship = this.ship;
-    ship.transit = false;
     const f = this.fuel;
     f.heat = false;
     if (f.on) {
@@ -271,20 +339,23 @@ export class Universe {
         f.level = Math.max(0, f.level - 8 * dt);
       }
     }
-    for (const body of this.bodies) {
-      const vector = sub(body.pos, ship.pos);
-      const d = mag(vector);
-      if (d < body.radius) {
-        if (body === this.star) ship.transit = true;
-      } else if (this.now > ship.launchClock + LAUNCH_MECO) {
-        const g = (GRAVITATION * ship.mass * body.mass) / (d * d);
-        ship.velocity = add(ship.velocity, mul(fromAngle(angleOf(vector), g), dt));
+    for (const s of this.ships) {
+      s.transit = false;
+      for (const body of this.bodies) {
+        const vector = sub(body.pos, s.pos);
+        const d = mag(vector);
+        if (d < body.radius) {
+          if (body === this.star) s.transit = true;
+        } else if (this.now > s.launchClock + LAUNCH_MECO) {
+          const g = (GRAVITATION * s.mass * body.mass) / (d * d);
+          s.velocity = add(s.velocity, mul(fromAngle(angleOf(vector), g), dt));
+        }
       }
     }
     for (const e of this.entities) e.update(this, dt);
     for (const p of this.planets) p.update(this, dt);
     this.star.update(this, dt);
-    ship.update(this, dt);
+    for (const s of this.ships) s.update(this, dt);
     for (const s of this.sparks) s.update(this, dt);
 
     // 2. constraints
@@ -292,7 +363,7 @@ export class Universe {
 
     // 3. velocities from positions
     for (const p of this.planets) p.postUpdate(this, dt);
-    ship.postUpdate(this, dt);
+    for (const s of this.ships) s.postUpdate(this, dt);
     for (const s of this.sparks) s.postUpdate(this, dt);
 
     this.sparks = this.sparks.filter((s) => !s.dead);
@@ -301,29 +372,28 @@ export class Universe {
   }
 
   solve(dt) {
-    const ship = this.ship;
-    if (!ship.landing) {
-      const planet = this.closestPlanet();
-      if (planet.collides) {
-        const d = dist(ship.pos, planet.pos) - ship.radius - planet.radius;
-        const a = angleOf(sub(ship.pos, planet.pos));
-        if (d < 0) {
-          // landing or impact? Heading must be within 45 degrees of straight up.
-          // (No angle wrap here; same as the original.)
-          if (Math.abs(ship.angle - a) < Math.PI / 4) {
-            this.beginLanding(planet, a);
-          } else {
-            const impact = add(planet.pos, fromAngle(a, planet.radius));
-            ship.pos = add(planet.pos, fromAngle(a, planet.radius + ship.radius - d));
-            for (let i = 0; i < 10; i++) {
-              const s = new Spark({
-                ttl: this.rng.range(0.5, 2), style: 'dot', color: '#fff', size: 1,
-              });
-              s.pos = add(impact, fromAngle(this.rng.range(0, PI2), this.rng.range(0.1, 0.5)));
-              s.opos = s.pos;
-              s.velocity = add(mul(ship.velocity, 0.8),
-                fromAngle(this.rng.range(0, PI2), this.rng.range(0.1, 0.5)));
-              this.sparks.push(s);
+    for (const ship of this.ships) {
+      if (!ship.landing) {
+        const planet = this.closestPlanet(ship);
+        if (planet.collides) {
+          const d = dist(ship.pos, planet.pos) - ship.radius - planet.radius;
+          const a = angleOf(sub(ship.pos, planet.pos));
+          if (d < 0) {
+            // landing or impact? Heading must be within 45 degrees of straight up.
+            // (No angle wrap here; same as the original.)
+            if (Math.abs(ship.angle - a) < Math.PI / 4) {
+              this.beginLanding(ship, planet, a);
+            } else {
+              const impact = add(planet.pos, fromAngle(a, planet.radius));
+              ship.pos = add(planet.pos, fromAngle(a, planet.radius + ship.radius - d));
+              for (let i = 0; i < 10 && this.sparks.length < MAX_SPARKS; i++) {
+                const s = new Spark({ ttl: this.rng.range(0.5, 2), style: 'dot', color: '#fff', size: 1 });
+                s.pos = add(impact, fromAngle(this.rng.range(0, PI2), this.rng.range(0.1, 0.5)));
+                s.opos = s.pos;
+                s.velocity = add(mul(ship.velocity, 0.8),
+                  fromAngle(this.rng.range(0, PI2), this.rng.range(0.1, 0.5)));
+                this.sparks.push(s);
+              }
             }
           }
         }
@@ -331,8 +401,10 @@ export class Universe {
     }
     for (const l of this.landings) l.solve(this, dt);
     // ringfence
-    if (mag(ship.pos) + ship.radius > UNIVERSE_RANGE) {
-      ship.pos = fromAngle(angleOf(ship.pos), UNIVERSE_RANGE - ship.radius);
+    for (const ship of this.ships) {
+      if (mag(ship.pos) + ship.radius > UNIVERSE_RANGE) {
+        ship.pos = fromAngle(angleOf(ship.pos), UNIVERSE_RANGE - ship.radius);
+      }
     }
   }
 }

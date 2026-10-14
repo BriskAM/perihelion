@@ -18,14 +18,15 @@ const STICK_MIN = 50, STICK_MAX = 100;
 const params = new URLSearchParams(location.search);
 const seed = Math.abs(parseInt(params.get('seed') ?? '', 10)) || dailySeed();
 
-const universe = new Universe(seed);
+const state = loadSave();
+writeSave(state); // persist defaults (e.g. the hull seed) so they stay stable
+const universe = new Universe(seed, { shipSeed: state.shipSeed });
 const autopilot = new Autopilot(universe.ship, universe);
 universe.ship.autopilot = autopilot;
 universe.entities.push(autopilot);
 if (params.has('auto')) autopilot.enabled = true;
 
 // ---- extras: saved progress, fuel, missions, codex ----
-const state = loadSave();
 const seedKey = String(seed);
 for (const idx of state.explored[seedKey] ?? []) {
   if (universe.planets[idx]) universe.planets[idx].explored = true;
@@ -33,6 +34,8 @@ for (const idx of state.explored[seedKey] ?? []) {
 const missions = makeMissions(universe);
 
 function applyShip() {
+  autopilot.assist = state.options.assist;
+  universe.style.fancy = state.options.fancy;
   const s = shipStats(state), f = universe.fuel;
   f.on = state.options.survival;
   f.capacity = s.capacity; f.burn = s.burn; f.refuelRate = s.refuelRate;
@@ -67,6 +70,7 @@ const ui = createUI({
     randomSeed() { location.search = `?seed=${1 + Math.floor(Math.random() * 9_999_999)}`; },
     dailySeed() { location.search = ''; },
     reset() { resetSave(); location.reload(); },
+    reroll() { state.shipSeed = 1 + Math.floor(Math.random() * 999_999_999); persist(); location.reload(); },
   },
 });
 
@@ -88,6 +92,19 @@ universe.onLanded = (planet, { rescue, first }) => {
   }
   persist();
 };
+
+// ---- AI ships: announce when one comes close ----
+const nearShips = new Set();
+function checkContacts() {
+  for (const s of universe.ships) {
+    if (!s.isAI) continue;
+    const d = dist(s.pos, universe.ship.pos);
+    if (d < 3500 && !nearShips.has(s)) {
+      nearShips.add(s);
+      ui.toast(`CONTACT: ${s.name} (${s.role})`);
+    } else if (d > 9000) nearShips.delete(s);
+  }
+}
 
 let missionClock = 0;
 function checkMissions() {
@@ -180,6 +197,8 @@ const release = (e) => {
 };
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('lostpointercapture', release);
+window.addEventListener('blur', () => { stick.active = false; stickChanged(null); });
 
 // camera
 const cam = { x: 0, y: 0, zoom: DEFAULT_ZOOM };
@@ -200,10 +219,12 @@ function updateHud() {
     `BODIES: ${explored.length} / ${u.planets.length}`,
     '',
   ];
-  for (const p of explored) {
+  const SHOWN = 5; // the rest live in the CODEX tab
+  for (const p of explored.slice(-SHOWN)) {
     lines.push(`  BODY: ${p.name}`, `  TYPE: ${cap(p.description)}`, `  ATMO: ${cap(p.atmosphere)}`,
       ` FAUNA: ${cap(p.fauna)}`, ` FLORA: ${cap(p.flora)}`, '');
   }
+  if (explored.length > SHOWN) lines.push(`(+${explored.length - SHOWN} more: MENU > CODEX)`);
   const catalog = lines.join('\n');
   if (hudTop.textContent !== catalog) {
     hudTop.textContent = catalog;
@@ -246,12 +267,15 @@ function frame(ms) {
 
   renderUniverse(ctx, u, cam, w, h, dpr);
   drawStick(ctx, stick, dpr);
+  autopilot.manual = stick.active;
   updateHud();
+  checkContacts();
   missionClock += Math.max(0, u.dt);
   if (missionClock > 0.25) { missionClock = 0; checkMissions(); }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
-window.__universe = universe; // handy for poking around in the console
+window.__universe = universe;
+window.__cam = cam; // handy for poking around in the console
 void STAR_CLASSES;
