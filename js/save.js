@@ -9,7 +9,7 @@ const blank = () => ({
   codex: [], // full text of every discovery
   done: [], // completed mission ids
   milestones: [],
-  options: { survival: true, missions: true, assist: true, fancy: true, warp: true, strict: true, pip: true, orbit: true, pace: 1 },
+  options: { survival: true, missions: true, assist: true, fancy: true, warp: true, strict: true, pip: true, orbit: true, pace: 1, volume: 0.6 },
   shipModel: 'dart',
 });
 

@@ -148,6 +148,16 @@ export function createUI({ state, universe, missions, seed, actions }) {
     }
     pace.append(paceRow);
     body.append(pace);
+    const vol = el('div', 'card');
+    vol.append(el('div', 'title', 'Sound'), el('div', 'dim', 'Procedural: engine, air, a drone for each kind of star, and a little tune for every world you discover.'));
+    const volRow = el('div', 'btnrow');
+    for (const [label, v] of [['OFF', 0], ['LOW', 0.25], ['MEDIUM', 0.6], ['LOUD', 1]]) {
+      const b = button(label, () => actions.option('volume', v));
+      b.classList.toggle('picked', state.options.volume === v);
+      volRow.append(b);
+    }
+    vol.append(volRow);
+    body.append(vol);
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');

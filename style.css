@@ -24,7 +24,7 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 #autotext { color: var(--autopilot); margin-bottom: 6px; }
 .row { display: flex; align-items: flex-end; gap: 8px; }
 #ship { flex: 1; }
-#auto {
+#auto, #pipbtn {
   pointer-events: auto; font: inherit; letter-spacing: 1px; color: var(--console);
   background: transparent; border: 1px solid var(--console); padding: 6px 10px; min-width: 48px; min-height: 48px; cursor: pointer;
 }
@@ -95,3 +95,5 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
   border: 1px solid var(--console); border-radius: 50%; background: var(--void); pointer-events: none; opacity: 0.95;
 }
 #pip[hidden] { display: none; }
+
+#pipbtn { pointer-events: auto; }

@@ -59,6 +59,8 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   orbit phases (capture, orbit hold, descent). Faster is rougher: hard landings roughly triple at Turbo.
 - While the autopilot is on, the ship cam stays open. Zoomed out it shows the ship close-up; zoomed in it
   switches to a wide overview of the trip (ship, target and the route between them).
+- Floating window (PIP button or P): a small always-on-top window with a low-detail view of the autopilot, so you can keep watching while using other tabs. Uses Document Picture-in-Picture (Chrome/Edge), falling back to a video PiP. Idle mode auto-rescues the ship if it runs dry. (Written but not verified in a real browser window.)
+- Procedural sound: engine, air and reentry, a drone per star class, a tune for every world, plus effects. Options > Sound.
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment

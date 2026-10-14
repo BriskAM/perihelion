@@ -163,7 +163,7 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now 
     ctx.restore();
   }
 
-  if (p.atmo) { // atmosphere: a few fading shells above the surface, thicker air = brighter
+  if (p.atmo && !view.lite) { // atmosphere: a few fading shells above the surface, thicker air = brighter
     const top = p.atmo.top, a = Math.min(0.6, 0.15 + p.atmo.rho0 * 0.5);
     ctx.strokeStyle = p.haze ?? color;
     ctx.lineWidth = 1.5 * px;

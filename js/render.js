@@ -45,6 +45,7 @@ function roundedClosedPath(ctx, pts) {
 }
 
 function gravitationalField(ctx, view, body, now, px, rgb = '255,0,0') {
+  if (view.lite) return;
   const rings = 10;
   for (let i = 0; i < rings; i++) {
     const force = lerp(2000, 0.01, (i - (now % 1)) / rings);
@@ -66,7 +67,7 @@ function drawPlanet(ctx, view, p, u, px) {
   if (arcPath(ctx, view, c.x, c.y, p.orbitRadius)) ctx.stroke();
 
   gravitationalField(ctx, view, p, u.now, px);
-  const showTex = p.explored && view.zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
+  const showTex = !view.lite && p.explored && view.zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
   drawPlanetBody(ctx, p, view, px, showTex, drawColor, COLORS.void, u.now);
 }
 
@@ -77,6 +78,7 @@ function drawStar(ctx, view, star, now, px) {
   ctx.fillStyle = star.color;
   ctx.beginPath();
   if (discPath(ctx, view, x, y, star.radius)) ctx.fill();
+  if (view.lite) return;
   ctx.save();
   ctx.translate(x, y);
   ctx.strokeStyle = star.color;
@@ -136,6 +138,12 @@ function drawBlackHole(ctx, view, bh, now, px) {
   if (!inView(view, x, y, rh * 7)) return;
   ctx.save();
   ctx.translate(x, y);
+  if (view.lite) { // just the black disc and its bright rim
+    ctx.fillStyle = '#000'; ctx.strokeStyle = '#fff4d8'; ctx.lineWidth = 2 * px;
+    ctx.beginPath(); ctx.arc(0, 0, rh, 0, PI2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    return;
+  }
   if (rh * 6 * view.zoom < 3500) { // soft glow
     const g = ctx.createRadialGradient(0, 0, rh * 0.9, 0, 0, rh * 6);
     g.addColorStop(0, 'rgba(255,170,70,0.30)');
@@ -223,7 +231,7 @@ function drawBelt(ctx, view, belt, now, px) {
       const a = belt.angle(i, now), r = belt.r[i], s = belt.size[i];
       const x = Math.cos(a) * r, y = Math.sin(a) * r;
       if (Math.abs(x - view.cx) > lx + s || Math.abs(y - view.cy) > ly + s) continue;
-      if (s * view.zoom < 1.8) { dots.rect(x - px, y - px, 2 * px, 2 * px); continue; }
+      if (view.lite || s * view.zoom < 1.8) { dots.rect(x - px, y - px, 2 * px, 2 * px); continue; }
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(a * 3 + i);
@@ -298,7 +306,7 @@ function drawSatellites(ctx, u, view, px) {
   const ship = u.ship;
   for (const sat of u.satellites) {
     const { x, y } = sat.pos;
-    if (sat.parent && view.zoom > 0.2) { // faint orbit track
+    if (sat.parent && view.zoom > 0.2 && !view.lite) { // faint orbit track
       ctx.strokeStyle = SAT_COLORS[sat.kind];
       ctx.globalAlpha = 0.14;
       ctx.lineWidth = px;
@@ -322,7 +330,7 @@ function drawSatellites(ctx, u, view, px) {
     if (sat.kind === 'probe') { ctx.moveTo(s * 0.35, 0); ctx.lineTo(s * 1.2, 0); } // dish
     ctx.stroke();
     ctx.restore();
-    if (view.zoom > 0.3 || dist(sat.pos, ship.pos) < 500) {
+    if (!view.lite && (view.zoom > 0.3 || dist(sat.pos, ship.pos) < 500)) {
       ctx.save();
       ctx.translate(x, y);
       ctx.scale(px, px);
@@ -364,9 +372,19 @@ function drawSpark(ctx, s, px) {
   }
 }
 
-function drawTrail(ctx, ship, fancy, px) {
+function drawTrail(ctx, ship, fancy, px, lite = false) {
   const t = ship.track;
   if (t.length < 2) return;
+  if (lite) { // one cheap faint line
+    ctx.strokeStyle = ship.isAI ? 'rgba(180,180,255,0.3)' : 'rgba(120,230,160,0.6)';
+    ctx.lineWidth = px;
+    ctx.beginPath();
+    for (let i = Math.max(0, t.length - 500); i < t.length; i += 4) {
+      if (i === 0 || i === Math.max(0, t.length - 500)) ctx.moveTo(t[i].x, t[i].y); else ctx.lineTo(t[i].x, t[i].y);
+    }
+    ctx.stroke();
+    return;
+  }
   if (!fancy) { // classic: consecutive pairs, so it reads as dashes
     ctx.strokeStyle = COLORS.track;
     ctx.lineWidth = px;
@@ -401,7 +419,7 @@ function drawTrail(ctx, ship, fancy, px) {
 
 function drawSpacecraft(ctx, u, ship, view, px, fancy) {
   if (!inView(view, ship.pos.x, ship.pos.y, 80) && !ship.track.length) return;
-  drawTrail(ctx, ship, fancy, px);
+  drawTrail(ctx, ship, fancy, px, view.lite);
   if (!inView(view, ship.pos.x, ship.pos.y, 80)) return;
   if ((ship.heatRate ?? 0) > 0.15 && mag(ship.velocity) > 50) { // reentry plasma streaming behind the ship
     const k = Math.min(2.5, ship.heatRate);
@@ -438,7 +456,7 @@ function drawSpacecraft(ctx, u, ship, view, px, fancy) {
     landed: !!ship.landing, fancy, void: COLORS.void,
   });
   ctx.restore();
-  if (ship.isAI && view.zoom > 0.25) { // callsign tag
+  if (ship.isAI && view.zoom > 0.25 && !view.lite) { // callsign tag
     ctx.save();
     ctx.translate(ship.pos.x, ship.pos.y);
     ctx.scale(px, px);
@@ -525,10 +543,11 @@ function drawLanding(ctx, l, px) {
 /**
  * Draw the whole scene. `cam` = { x, y, zoom } in world units; w/h are CSS pixels.
  */
-export function renderUniverse(ctx, u, cam, w, h, dpr) {
+export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false) {
   const { zoom } = cam;
   const px = 1 / zoom; // one CSS pixel in world units
   const view = makeView(cam.x, cam.y, w, h, zoom);
+  view.lite = lite; // lite: less detail (no grid, gravity rings, textures, glow or labels)
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = COLORS.void;
   ctx.fillRect(0, 0, w * dpr, h * dpr);
@@ -538,17 +557,19 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
   const sx = shake ? (Math.random() - 0.5) * shake : 0, sy = shake ? (Math.random() - 0.5) * shake : 0;
   ctx.setTransform(s, 0, 0, s, (w * dpr) / 2 - cam.x * s + sx, (h * dpr) / 2 - cam.y * s + sy);
 
-  drawGrid(ctx, u, view, px);
+  if (!lite) drawGrid(ctx, u, view, px);
 
   for (const l of u.landings) if (l.player) drawLanding(ctx, l, px);
 
   // ringfence
+  if (!lite) {
   ctx.strokeStyle = '#800000';
   ctx.lineWidth = px;
   ctx.setLineDash([8 * px, 8 * px]);
   ctx.beginPath();
   if (arcPath(ctx, view, 0, 0, UNIVERSE_RANGE)) ctx.stroke();
   ctx.setLineDash([]);
+  }
 
   for (const belt of u.belts) drawBelt(ctx, view, belt, u.now, px);
   for (const wl of u.wells) {
@@ -556,9 +577,9 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
     else drawStar(ctx, view, wl, u.now, px);
   }
   drawSatellites(ctx, u, view, px);
-  for (const sp of u.sparks) drawSpark(ctx, sp, px);
+  if (!lite) for (const sp of u.sparks) drawSpark(ctx, sp, px);
   for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
-  if (u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
+  if (!lite && u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
   const fancy = u.style.fancy;
   for (const sh of u.ships) if (sh !== u.ship) drawSpacecraft(ctx, u, sh, view, px, fancy);
   drawSpacecraft(ctx, u, u.ship, view, px, fancy);

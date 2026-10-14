@@ -10,6 +10,7 @@ import {
 import { makeMissions } from './missions.js';
 import { createUI } from './ui.js';
 import { makeDesign } from './ships.js';
+import { Sound } from './audio.js';
 
 const DEFAULT_ZOOM = 1;
 const MIN_ZOOM = 250 / 200_000;
@@ -35,10 +36,24 @@ for (const idx of state.explored[seedKey] ?? []) {
 }
 const missions = makeMissions(universe);
 
+// ---- sound (procedural; starts at the first click or key press) ----
+const sound = new Sound();
+sound.volume = state.options.volume;
+let soundStarted = false;
+function unlockSound() {
+  if (soundStarted || state.options.volume <= 0) return;
+  sound.start();
+  sound.setPad(universe.star.cls, !!universe.star.isBlackHole);
+  soundStarted = true;
+}
+for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, unlockSound);
+
 function applyShip() {
   autopilot.assist = state.options.assist;
   autopilot.orbitFirst = state.options.orbit;
   autopilot.pace = state.options.pace;
+  sound.setVolume(state.options.volume);
+  if (state.options.volume > 0) unlockSound();
   universe.style.fancy = state.options.fancy;
   universe.style.warp = state.options.warp;
   universe.style.strict = state.options.strict;
@@ -86,6 +101,7 @@ const ui = createUI({
 });
 
 universe.onLanded = (planet, { rescue, first, survey }) => {
+  if (first && !rescue) sound.discover(planet.name); else if (!rescue) sound.touchdown();
   if (!first || rescue) return;
   const idx = universe.planets.indexOf(planet);
   (state.explored[seedKey] ??= []).push(idx);
@@ -98,7 +114,7 @@ universe.onLanded = (planet, { rescue, first, survey }) => {
   for (const [count, title] of MILESTONES) {
     if (state.codex.length >= count && !state.milestones.includes(title)) {
       state.milestones.push(title);
-      ui.toast(`RANK UP: ${title.toUpperCase()}`, 'good');
+      ui.toast(`RANK UP: ${title.toUpperCase()}`, 'good'); sound.fanfare();
     }
   }
   persist();
@@ -126,7 +142,7 @@ function checkMissions() {
     if (cur >= max) {
       state.done.push(m.id);
       state.credits += m.reward;
-      ui.toast(`MISSION COMPLETE: ${m.title}  +${m.reward} CR`, 'good');
+      ui.toast(`MISSION COMPLETE: ${m.title}  +${m.reward} CR`, 'good'); sound.fanfare();
       persist();
     }
   }
@@ -138,14 +154,17 @@ document.getElementById('menubtn').addEventListener('click', () => ui.toggle());
 document.getElementById('menubtn').addEventListener('pointerdown', (e) => e.stopPropagation());
 const rescueBtn = document.getElementById('rescue');
 rescueBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-rescueBtn.addEventListener('click', () => {
-  const planet = universe.planets.reduce((a, b) =>
-    (dist(a.pos, universe.ship.pos) < dist(b.pos, universe.ship.pos) ? a : b));
-  state.credits = Math.floor(state.credits * 0.75);
+// Rescue: park on the nearest solid world. Free when the game is playing itself (see idle mode).
+function rescue(free = false) {
+  const solid = universe.planets.filter((p) => !p.gas);
+  const planet = solid.reduce((a, b) => (dist(a.pos, universe.ship.pos) < dist(b.pos, universe.ship.pos) ? a : b));
+  if (!free) state.credits = Math.floor(state.credits * 0.75);
   universe.forceLand(planet, true);
   universe.fuel.level = Math.min(universe.fuel.capacity, 20);
-  ui.toast('RESCUED: -25% credits'); persist();
-});
+  ui.toast(free ? 'AUTO-RESCUE' : 'RESCUED: -25% credits'); persist();
+}
+rescueBtn.addEventListener('click', () => rescue(false));
+
 
 // the player's ship is lost (black hole or crash): wake up parked on the safest planet
 function respawnPlayer(message, farFrom) {
@@ -160,17 +179,18 @@ function respawnPlayer(message, farFrom) {
   ui.toast(message, 'bad');
   persist();
 }
-universe.onConsumed = () => respawnPlayer('LOST TO THE SINGULARITY: -25% credits', universe.blackHoles);
-universe.onDestroyed = (ship, { planet, speed, reason }) =>
+universe.onConsumed = () => sound.swallowed() || respawnPlayer('LOST TO THE SINGULARITY: -25% credits', universe.blackHoles);
+universe.onDestroyed = (ship, { planet, speed, reason }) => sound.explode() ||
   respawnPlayer(reason === 'crashed' || !reason
     ? `CRASHED ON ${planet.name.toUpperCase()} AT ${Math.round(speed)}: -25% credits`
     : `${reason.toUpperCase()} AT ${planet.name.toUpperCase()}: -25% credits`, []);
 universe.onServiced = (sat) => {
+  sound.dock();
   state.credits += 10;
   ui.toast(`DOCKED WITH ${sat.name.toUpperCase()}: +10 CR${universe.fuel.on ? ', +15 fuel' : ''}`, 'good');
   persist();
 };
-universe.onImpact = ({ planet, speed, safe, damage }) =>
+universe.onImpact = ({ planet, speed, safe, damage }) => sound.thud() ||
   ui.toast(`HARD LANDING on ${planet.name.toUpperCase()}: ${Math.round(speed)} (limit ${Math.round(safe)})` +
     (universe.fuel.on ? `  -${Math.round(damage)} fuel` : ''), 'bad');
 
@@ -374,7 +394,108 @@ function drawShipCam() {
   pipCtx.fillStyle = '#ff8800'; pipCtx.fillText('thrust', 14, 25);
 }
 
-function frame(ms) {
+// ---- floating window (picture-in-picture) --------------------------------------------------
+// Opens a small always-on-top window showing the autopilot flying a low-detail view, so you can keep
+// watching while you use other tabs. It uses the Document Picture-in-Picture API where there is one
+// (Chrome/Edge) and a video PiP of a canvas stream elsewhere. Browsers stop animation frames in a
+// hidden tab, so while the window is open a worker ticks the game instead, and idle mode keeps it going.
+const pipWin = { active: false, win: null, canvas: null, ctx: null, video: null, kind: null, dpr: 1 };
+let ticker = null, strandedFor = 0;
+
+function startTicker() {
+  if (ticker) return;
+  const blob = new Blob(['setInterval(() => postMessage(0), 33)'], { type: 'text/javascript' });
+  ticker = new Worker(URL.createObjectURL(blob));
+  ticker.onmessage = () => { if (document.hidden) tick(performance.now()); };
+}
+function stopTicker() { ticker?.terminate(); ticker = null; }
+
+function sizePipCanvas() {
+  if (pipWin.kind !== 'document') return;
+  const win = pipWin.win;
+  pipWin.dpr = Math.min(win.devicePixelRatio || 1, 2);
+  pipWin.canvas.width = Math.round(win.innerWidth * pipWin.dpr);
+  pipWin.canvas.height = Math.round(win.innerHeight * pipWin.dpr);
+}
+
+async function openDocumentPip() {
+  const win = await window.documentPictureInPicture.requestWindow({ width: 340, height: 340 });
+  win.document.body.style.cssText = 'margin:0;background:#16161d;overflow:hidden';
+  const canvas = win.document.createElement('canvas');
+  canvas.style.cssText = 'width:100vw;height:100vh;display:block';
+  win.document.body.append(canvas);
+  Object.assign(pipWin, { active: true, win, canvas, ctx: canvas.getContext('2d'), kind: 'document' });
+  sizePipCanvas();
+  win.addEventListener('resize', sizePipCanvas);
+  win.addEventListener('pagehide', closePip);
+}
+
+async function openVideoPip() {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 480;
+  const c2 = canvas.getContext('2d'); // a stream gives no video until the canvas has been painted once
+  c2.fillStyle = '#16161d'; c2.fillRect(0, 0, 480, 480);
+  const video = document.createElement('video');
+  video.muted = true; video.playsInline = true; video.srcObject = canvas.captureStream(30);
+  const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  await within(video.play(), 3000);
+  await within(video.requestPictureInPicture(), 3000);
+  video.addEventListener('leavepictureinpicture', closePip);
+  Object.assign(pipWin, { active: true, canvas, ctx: canvas.getContext('2d'), video, kind: 'video', dpr: 1 });
+}
+
+async function openPip() {
+  if (pipWin.active) return closePip();
+  unlockSound();
+  setAuto(true); // the window is for watching: the autopilot flies
+  const attempts = [];
+  if ('documentPictureInPicture' in window) attempts.push(openDocumentPip);
+  if (document.pictureInPictureEnabled) attempts.push(openVideoPip);
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try { await attempt(); lastErr = null; break; } catch (err) { lastErr = err; console.warn('floating window failed', err); }
+  }
+  if (!pipWin.active) {
+    ui.toast(attempts.length ? `Could not open the floating window (${lastErr?.name ?? 'error'})` : 'Floating windows are not supported in this browser');
+    return;
+  }
+  startTicker();
+  ui.toast('Floating window open: the autopilot keeps flying');
+}
+
+function closePip() {
+  if (!pipWin.active) return;
+  const { win, video } = pipWin;
+  pipWin.active = false;
+  stopTicker();
+  try { win?.close(); } catch { /* already gone */ }
+  if (video) { try { document.exitPictureInPicture(); } catch { /* ignore */ } video.srcObject = null; }
+  Object.assign(pipWin, { win: null, canvas: null, ctx: null, video: null, kind: null });
+}
+document.getElementById('pipbtn').addEventListener('click', openPip);
+document.getElementById('pipbtn').addEventListener('pointerdown', (e) => e.stopPropagation());
+window.addEventListener('keydown', (e) => { if (e.key === 'p' || e.key === 'P') openPip(); });
+
+// the low-detail picture for the floating window
+function drawFloating() {
+  const u = universe, ship = u.ship, { ctx: c, canvas } = pipWin;
+  const d = pipWin.dpr, cw = canvas.width / d, ch = canvas.height / d;
+  renderUniverse(c, u, { x: ship.pos.x, y: ship.pos.y, zoom: cam.zoom }, cw, ch, d, true);
+  c.setTransform(d, 0, 0, d, 0, 0);
+  c.fillStyle = 'rgba(22,22,29,0.75)';
+  c.fillRect(0, ch - 40, cw, 40);
+  c.fillStyle = '#b7b7ff';
+  c.font = '11px ui-monospace, Menlo, monospace';
+  c.textAlign = 'left';
+  const tgt = autopilot.target;
+  c.fillText(`${u.star.name}  ${u.planets.filter((p) => p.explored).length}/${u.planets.length} charted`, 8, ch - 25);
+  c.fillStyle = '#4c8df6';
+  c.fillText(`${autopilot.strategy}${tgt ? ' > ' + tgt.name : ''}`, 8, ch - 9);
+}
+
+let lockBucket = 0;
+function tick(ms) {
+  if (ms - lastMs < 8) return; // the page and the worker can both call this; only run once per frame
   const u = universe;
   u.step(ms / 1000);
 
@@ -384,17 +505,38 @@ function frame(ms) {
   cam.zoom = expSmooth(cam.zoom, target, u.frameDt, 1.5);
   cam.x = u.ship.pos.x; cam.y = u.ship.pos.y;
 
-  renderUniverse(ctx, u, cam, w, h, dpr);
-  drawStick(ctx, stick, dpr);
-  drawShipCam();
+  if (!document.hidden) { // nothing to paint in a hidden tab
+    renderUniverse(ctx, u, cam, w, h, dpr);
+    drawStick(ctx, stick, dpr);
+    drawShipCam();
+  }
+  if (pipWin.active) drawFloating();
   autopilot.manual = stick.active;
   hudClock += ms - lastMs; lastMs = ms;
-  if (hudClock > 100) { hudClock = 0; updateHud(); checkContacts(); } // the HUD does not need 60 fps
+  if (hudClock > 100) {
+    hudClock = 0;
+    if (!document.hidden) updateHud();
+    checkContacts();
+  }
   missionClock += Math.max(0, u.frameDt);
   if (missionClock > 0.25) { missionClock = 0; checkMissions(); }
-  requestAnimationFrame(frame);
+
+  // sound follows what the ship is doing
+  sound.update({
+    thrust: mag(u.ship.thrust), speed: mag(u.ship.velocity), rho: u.ship.atmoRho || 0, heat: u.ship.heat,
+    tidal: u.tidal, timeScale: u.timeScale, landed: !!u.ship.landing,
+  });
+  const lb = autopilot.strategy === 'ACQUIRING' ? Math.floor(autopilot.lock * 8) : 0;
+  if (lb !== lockBucket) { if (lb > 0) sound.lockTick(autopilot.lock); lockBucket = lb; }
+
+  // idle mode (floating window open): never stay stranded
+  if (pipWin.active && u.fuel.on && u.fuel.level <= 0 && !u.ship.landing) {
+    strandedFor += u.frameDt;
+    if (strandedFor > 6) { strandedFor = 0; rescue(true); }
+  } else strandedFor = 0;
 }
-requestAnimationFrame(frame);
+function raf(ms) { tick(ms); requestAnimationFrame(raf); }
+requestAnimationFrame(raf);
 
 window.__universe = universe;
 window.__cam = cam; // handy for poking around in the console
