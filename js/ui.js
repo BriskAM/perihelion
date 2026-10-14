@@ -1,4 +1,5 @@
 import { UPGRADES, MAX_UPGRADE, MILESTONES } from './save.js';
+import { SHIP_MODELS, MODEL_IDS } from './ships.js';
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -100,9 +101,15 @@ export function createUI({ state, universe, missions, seed, actions }) {
       body.append(el('p', 'dim', 'Survival (fuel and heat) is off, so upgrades have no effect.'));
     }
     const hull = el('div', 'card');
-    hull.append(el('div', 'title', `Hull design #${state.shipSeed}`),
-      el('div', 'dim', 'Your ship\u2019s shape is generated from this number.'));
-    hull.append(button('REROLL HULL', actions.reroll));
+    hull.append(el('div', 'title', 'Hull'));
+    const models = el('div', 'btnrow');
+    for (const id of MODEL_IDS) {
+      const b = button(SHIP_MODELS[id].name + (state.shipModel === id ? ' *' : ''), () => actions.setModel(id));
+      b.classList.toggle('picked', state.shipModel === id);
+      models.append(b);
+    }
+    hull.append(models);
+    if (SHIP_MODELS[state.shipModel].credit) hull.append(el('div', 'dim', SHIP_MODELS[state.shipModel].credit));
     body.append(hull);
     for (const [id, u] of Object.entries(UPGRADES)) {
       const lvl = state.upgrades[id];
@@ -127,6 +134,7 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('survival', 'Survival', 'Fuel burns when you thrust; the star corona burns it faster. Refuel by landing.');
     toggleRow('missions', 'Missions', 'Three jobs per system, paid in credits.');
     toggleRow('assist', 'Assisted autopilot', 'Takes time to lock on, turns at a limited rate, and hands control back when you grab the stick. Off = classic instant autopilot.');
+    toggleRow('warp', 'Warped gravity grid', 'The background grid dips into stars, black holes and big planets. Off = flat grid.');
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');

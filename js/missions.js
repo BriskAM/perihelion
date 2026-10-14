@@ -1,4 +1,4 @@
-import { makeRng, dist } from './maths.js';
+import { makeRng, mag } from './maths.js';
 
 // Missions are derived from the system seed (own RNG, so the universe itself is untouched),
 // which means everyone visiting the same seed gets the same three jobs.
@@ -29,7 +29,7 @@ export function makeMissions(u) {
       id: `${seed}:voyage`,
       title: `Voyage ${R.toLocaleString('en-US')} units from the star`,
       reward: 150 + Math.round(R / 1000),
-      progress: () => [Math.min(R, Math.round(dist(u.ship.pos, u.star.pos))), R],
+      progress: () => [Math.min(R, Math.round(mag(u.ship.pos))), R],
     },
     ...(moon ? [{
       id: `${seed}:moon`,

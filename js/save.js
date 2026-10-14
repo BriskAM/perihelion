@@ -9,8 +9,8 @@ const blank = () => ({
   codex: [], // full text of every discovery
   done: [], // completed mission ids
   milestones: [],
-  options: { survival: true, missions: true, assist: true, fancy: true },
-  shipSeed: 1 + Math.floor(Math.random() * 999_999_999),
+  options: { survival: true, missions: true, assist: true, fancy: true, warp: true },
+  shipModel: 'dart',
 });
 
 export function loadSave() {

@@ -9,6 +9,7 @@ import {
 } from './save.js';
 import { makeMissions } from './missions.js';
 import { createUI } from './ui.js';
+import { makeDesign } from './ships.js';
 
 const DEFAULT_ZOOM = 1;
 const MIN_ZOOM = 250 / 200_000;
@@ -19,8 +20,8 @@ const params = new URLSearchParams(location.search);
 const seed = Math.abs(parseInt(params.get('seed') ?? '', 10)) || dailySeed();
 
 const state = loadSave();
-writeSave(state); // persist defaults (e.g. the hull seed) so they stay stable
-const universe = new Universe(seed, { shipSeed: state.shipSeed });
+writeSave(state); // persist defaults so they stay stable
+const universe = new Universe(seed, { shipModel: state.shipModel });
 const autopilot = new Autopilot(universe.ship, universe);
 universe.ship.autopilot = autopilot;
 universe.entities.push(autopilot);
@@ -36,6 +37,7 @@ const missions = makeMissions(universe);
 function applyShip() {
   autopilot.assist = state.options.assist;
   universe.style.fancy = state.options.fancy;
+  universe.style.warp = state.options.warp;
   const s = shipStats(state), f = universe.fuel;
   f.on = state.options.survival;
   f.capacity = s.capacity; f.burn = s.burn; f.refuelRate = s.refuelRate;
@@ -70,7 +72,11 @@ const ui = createUI({
     randomSeed() { location.search = `?seed=${1 + Math.floor(Math.random() * 9_999_999)}`; },
     dailySeed() { location.search = ''; },
     reset() { resetSave(); location.reload(); },
-    reroll() { state.shipSeed = 1 + Math.floor(Math.random() * 999_999_999); persist(); location.reload(); },
+    setModel(id) {
+      state.shipModel = id;
+      universe.ship.design = makeDesign(id);
+      persist(); ui.render();
+    },
   },
 });
 
@@ -136,6 +142,20 @@ rescueBtn.addEventListener('click', () => {
   ui.toast('RESCUED: -25% credits'); persist();
 });
 
+// the player's ship was torn apart by a black hole: wake up parked on the safest planet
+universe.onConsumed = (ship) => {
+  const far = (p) => Math.min(...universe.blackHoles.map((b) => dist(b.pos, p.pos)));
+  const planet = universe.planets.filter((p) => !p.isMoon).sort((a, b) => far(b) - far(a))[0];
+  ship.consumed = null;
+  state.credits = Math.floor(state.credits * 0.75);
+  universe.forceLand(planet, true);
+  universe.fuel.level = Math.min(universe.fuel.capacity, 20);
+  universe.timeScale = 1;
+  autopilot.target = null;
+  ui.toast('LOST TO THE SINGULARITY: -25% credits', 'bad');
+  persist();
+};
+
 const canvas = document.getElementById('space');
 const ctx = canvas.getContext('2d');
 const hudTop = document.getElementById('catalog');
@@ -145,7 +165,7 @@ const autoBtn = document.getElementById('auto');
 
 let w = 0, h = 0, dpr = 1;
 function resize() {
-  dpr = window.devicePixelRatio || 1;
+  dpr = Math.min(window.devicePixelRatio || 1, 2); // 3x screens cost 2.25x the pixels for little gain
   w = window.innerWidth; h = window.innerHeight;
   canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
 }
@@ -211,11 +231,14 @@ function updateHud() {
   const u = universe, ship = u.ship, star = u.star;
   const explored = u.planets.filter((p) => p.explored);
   const designation = `PRH-${u.randomSeed % 100_000}`;
+  const cls = u.stars.map((s) => (s.isBlackHole ? 'BH' : s.cls)).join(' + ');
   const lines = [
     `  STAR: ${star.name} (${designation})`,
-    ` CLASS: ${star.cls}`,
-    `RADIUS: ${Math.trunc(star.radius)}`,
-    `  MASS: ${star.mass.toPrecision(3)}`,
+    ` CLASS: ${cls}${u.systemType === 'binary' ? ' (binary)' : ''}`,
+    `RADIUS: ${u.stars.map((s) => Math.trunc(s.radius)).join(' + ')}`,
+    `  MASS: ${u.totalMass.toPrecision(3)}`,
+    ...(u.blackHoles.length && !star.isBlackHole ? [`  HOLE: ${u.blackHoles[0].name}`] : []),
+    ...(u.belts.length ? [` BELTS: ${u.belts.length}`] : []),
     `BODIES: ${explored.length} / ${u.planets.length}`,
     '',
   ];
@@ -241,9 +264,14 @@ function updateHud() {
   const fuelLine = f.on
     ? `FUEL: ${Math.round((f.level / f.capacity) * 100)}%${f.heat ? '  !! HEAT !!' : f.level <= 0 ? '  EMPTY' : ''}`
     : null;
+  const near = u.nearestBlackHole(ship.pos);
+  const holeLine = u.tidal > 0.02
+    ? `!! TIDAL ${Math.round(u.tidal * 100)}%  TIME x${u.timeScale.toFixed(2)} !!`
+    : near && near.d < near.bh.radius * 14 ? `HOLE: ${Math.round(near.d - near.bh.radius)} TO HORIZON` : null;
   rescueBtn.hidden = !(f.on && f.level <= 0 && !ship.landing);
   const text = [
     first,
+    holeLine,
     fuelLine,
     `CR:  ${state.credits}`,
     `THR: ${Math.round(mag(ship.thrust) * 100)}%`,
@@ -255,6 +283,7 @@ function updateHud() {
   if (hudAuto.textContent !== at) hudAuto.textContent = at;
 }
 
+let hudClock = 1000, lastMs = 0;
 function frame(ms) {
   const u = universe;
   u.step(ms / 1000);
@@ -262,15 +291,15 @@ function frame(ms) {
   const closest = u.closestPlanet();
   const distToSurf = Math.max(0, dist(u.ship.pos, closest.pos) - closest.radius * 1.2);
   const target = dynamicZoom ? clamp(500 / distToSurf, MIN_ZOOM, MAX_ZOOM) : DEFAULT_ZOOM;
-  cam.zoom = expSmooth(cam.zoom, target, u.dt, 1.5);
+  cam.zoom = expSmooth(cam.zoom, target, u.frameDt, 1.5);
   cam.x = u.ship.pos.x; cam.y = u.ship.pos.y;
 
   renderUniverse(ctx, u, cam, w, h, dpr);
   drawStick(ctx, stick, dpr);
   autopilot.manual = stick.active;
-  updateHud();
-  checkContacts();
-  missionClock += Math.max(0, u.dt);
+  hudClock += ms - lastMs; lastMs = ms;
+  if (hudClock > 100) { hudClock = 0; updateHud(); checkContacts(); } // the HUD does not need 60 fps
+  missionClock += Math.max(0, u.frameDt);
   if (missionClock > 0.25) { missionClock = 0; checkMissions(); }
   requestAnimationFrame(frame);
 }

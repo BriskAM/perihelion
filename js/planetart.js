@@ -1,4 +1,5 @@
 import { PI2, makeRng } from './maths.js';
+import { arcPath, discPath, inView } from './view.js';
 
 // Procedural planet looks. Everything is derived from the planet's own seed, so a given
 // planet always looks the same. Collision stays circular; lumps and rings are cosmetic.
@@ -128,7 +129,7 @@ export function visual(p) {
     : null;
   const major = new Path2D(), minor = new Path2D();
   builders[kind](rng, major, minor);
-  return (p.vis = { kind, outline, rings, major, minor });
+  return (p.vis = { kind, lumpy: small, outline, rings, major, minor });
 }
 
 function ringEllipse(ctx, rings, R, start, end) {
@@ -140,13 +141,17 @@ function ringEllipse(ctx, rings, R, start, end) {
 }
 
 /** Draw planet body, surface texture (if `showTex`) and rings. */
-export function drawPlanetBody(ctx, p, px, showTex, color, voidColor) {
+export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
   const v = visual(p), R = p.radius;
+  const ringReach = v.rings ? v.rings.inner + v.rings.width : 1;
+  if (!inView(view, p.pos.x, p.pos.y, R * ringReach)) return;
+  const lumpy = v.lumpy;
+  const drawRings = v.rings && R * ringReach * view.zoom < 3000; // not worth it when huge on screen
   ctx.save();
-  ctx.translate(p.pos.x, p.pos.y);
 
-  if (v.rings) {
+  if (drawRings) {
     ctx.save();
+    ctx.translate(p.pos.x, p.pos.y);
     ctx.rotate(p.seed % 2 ? v.rings.tilt : -v.rings.tilt);
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.55;
@@ -155,28 +160,49 @@ export function drawPlanetBody(ctx, p, px, showTex, color, voidColor) {
     ctx.restore();
   }
 
-  ctx.save();
-  ctx.scale(R, R);
   ctx.fillStyle = voidColor;
-  ctx.fill(v.outline);
-  if (showTex) {
-    ctx.save();
-    ctx.clip(v.outline);
-    ctx.lineWidth = px / R;
-    ctx.strokeStyle = color;
-    ctx.stroke(v.major);
-    ctx.globalAlpha = 0.45;
-    ctx.stroke(v.minor);
-    ctx.restore();
-  }
   ctx.strokeStyle = color;
-  ctx.lineWidth = (2 * px) / R;
   ctx.lineJoin = 'round';
-  ctx.stroke(v.outline);
+  if (lumpy) {
+    ctx.translate(p.pos.x, p.pos.y);
+    ctx.scale(R, R);
+    ctx.fill(v.outline);
+    if (showTex) {
+      ctx.save();
+      ctx.clip(v.outline);
+      ctx.lineWidth = px / R;
+      ctx.stroke(v.major);
+      ctx.globalAlpha = 0.45;
+      ctx.stroke(v.minor);
+      ctx.restore();
+    }
+    ctx.lineWidth = (2 * px) / R;
+    ctx.stroke(v.outline);
+  } else {
+    ctx.beginPath();
+    if (discPath(ctx, view, p.pos.x, p.pos.y, R)) {
+      ctx.fill();
+      if (showTex) {
+        ctx.save();
+        ctx.clip();
+        ctx.translate(p.pos.x, p.pos.y);
+        ctx.scale(R, R);
+        ctx.lineWidth = px / R;
+        ctx.stroke(v.major);
+        ctx.globalAlpha = 0.45;
+        ctx.stroke(v.minor);
+        ctx.restore();
+      }
+    }
+    ctx.lineWidth = 2 * px;
+    ctx.beginPath();
+    if (arcPath(ctx, view, p.pos.x, p.pos.y, R)) ctx.stroke();
+  }
   ctx.restore();
 
-  if (v.rings) { // front half of the rings passes in front of the planet
+  if (drawRings) { // front half of the rings passes in front of the planet
     ctx.save();
+    ctx.translate(p.pos.x, p.pos.y);
     ctx.rotate(p.seed % 2 ? v.rings.tilt : -v.rings.tilt);
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.9;
@@ -184,5 +210,4 @@ export function drawPlanetBody(ctx, p, px, showTex, color, voidColor) {
     ringEllipse(ctx, v.rings, R, 0, Math.PI);
     ctx.restore();
   }
-  ctx.restore();
 }

@@ -19,15 +19,24 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
 - Procedural planet art (banded gas giants with storms, craters, cracks, continents, swirls),
   lumpy asteroids and ringed planets, all generated from each planet's own seed.
 - Moons: bigger planets get up to three moons on their own orbits. You can land on them.
-- Procedural ship hulls (reroll yours in the menu) and fading, speed-coloured trails with engine glow.
+- Six minimal ship models (pick one in the menu), including the classic outline from the
+  Android egg. Fading, speed-coloured trails with engine glow.
+- Binary star systems, binary planets (two worlds orbiting each other), black holes (at the centre
+  of some systems, or wandering the outer ones) and dense asteroid belts you can collide with.
+- Black holes: a black horizon with a photon ring, a lensed accretion disk and violet gravity
+  rings. Get close and time slows, the screen trembles and your ship stretches; cross the horizon
+  and you are lost (you respawn parked on a planet, minus a quarter of your credits).
+- The background grid sags into stars, black holes and big planets (switch it off in the menu).
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment
   after you let go). Turn it off in the menu for the classic instant autopilot.
 
 ## Credits
-Inspired by the space Easter egg in Android. This project contains no Google code, art or text:
-the simulation is a fresh implementation and all word lists, shapes and textures are original.
+Inspired by the space Easter egg in Android. The simulation is a fresh implementation and all
+word lists, textures and the other ship models are original. The one exception is the "Classic"
+ship outline (`js/classic-hull.js`), the SVG path from the Android Open Source Project, used
+under the Apache License 2.0 (`LICENSE-APACHE-2.0.txt`, copyright notice kept in that file).
 "Android" and its logo are trademarks of Google LLC, which is not affiliated with this project.
 
 ## License

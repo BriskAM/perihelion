@@ -86,20 +86,24 @@ export class Autopilot {
       .find((p) => !p.explored) ?? worlds[Math.floor(Math.random() * worlds.length)];
   }
 
-  /** Bend the course around the star if the straight line would pass through its corona. */
+  /** Bend the course around stars and black holes that sit on the straight line to the target. */
   avoidStar(ship, vector) {
-    const star = this.universe.star, R = star.radius * 1.9;
     const len2 = vector.x * vector.x + vector.y * vector.y;
     if (len2 < 1) return vector;
-    const toStar = sub(star.pos, ship.pos);
-    const t = dot(toStar, vector) / len2;
-    if (t <= 0 || t >= 1) return vector;
-    const closest = add(ship.pos, mul(vector, t));
-    const off = sub(closest, star.pos);
-    const m = mag(off);
-    if (m >= R || mag(toStar) < R * 0.8) return vector;
-    const dir = m > 1 ? mul(off, 1 / m) : { x: -vector.y / Math.sqrt(len2), y: vector.x / Math.sqrt(len2) };
-    return sub(add(star.pos, mul(dir, R * 1.15)), ship.pos);
+    let best = null, bestT = Infinity;
+    for (const w of this.universe.wells) {
+      const R = w.isBlackHole ? w.radius * 10 : w.radius * 1.9;
+      const toW = sub(w.pos, ship.pos);
+      const t = dot(toW, vector) / len2;
+      if (t <= 0 || t >= 1 || t >= bestT) continue;
+      const off = sub(add(ship.pos, mul(vector, t)), w.pos);
+      if (mag(off) >= R || mag(toW) < R * 0.8) continue;
+      best = { w, R, off }; bestT = t;
+    }
+    if (!best) return vector;
+    const m = mag(best.off);
+    const dir = m > 1 ? mul(best.off, 1 / m) : { x: -vector.y / Math.sqrt(len2), y: vector.x / Math.sqrt(len2) };
+    return sub(add(best.w.pos, mul(dir, best.R * 1.15)), ship.pos);
   }
 
   /**
@@ -131,6 +135,7 @@ export class Autopilot {
   update(sim, dt) {
     if (!this.enabled) return;
     const ship = this.ship;
+    if (ship.consumed) { this.target = null; return; }
 
     if (this.manual) { // you have the stick: hands off
       this.strategy = 'MANUAL';

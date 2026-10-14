@@ -1,9 +1,10 @@
-import { PI2, lerp, mag, sub, dist } from './maths.js';
+import { PI2, lerp, clamp, mag, sub, dist, angleOf, makeRng } from './maths.js';
 import {
-  GRAVITATION, SPACECRAFT_MASS, UNIVERSE_RANGE, CRAFT_SPEED_LIMIT,
+  GRAVITATION, SPACECRAFT_MASS, UNIVERSE_RANGE, CRAFT_SPEED_LIMIT, CONSUME_TIME,
 } from './universe.js';
 import { drawPlanetBody } from './planetart.js';
 import { drawShip } from './ships.js';
+import { makeView, arcPath, discPath, inView } from './view.js';
 
 export const COLORS = {
   void: '#16161d',
@@ -14,9 +15,11 @@ export const COLORS = {
   autopilot: '#4c8df6',
   track: '#3fb56a',
   flag: '#b8f23a',
+  rock: '#8f8fae',
 };
 
 const STAR_POINTS = 37;
+const BINS = 720; // must match the belt bins in universe.js
 
 function starPoints(r1, r2, n) {
   const step = PI2 / n, pts = [];
@@ -41,41 +44,41 @@ function roundedClosedPath(ctx, pts) {
   ctx.closePath();
 }
 
-function gravitationalField(ctx, body, now, px) {
+function gravitationalField(ctx, view, body, now, px, rgb = '255,0,0') {
   const rings = 10;
   for (let i = 0; i < rings; i++) {
     const force = lerp(2000, 0.01, (i - (now % 1)) / rings);
     const r = Math.sqrt((GRAVITATION * body.mass * SPACECRAFT_MASS) / force);
-    ctx.strokeStyle = `rgba(255,0,0,${lerp(0.75, 0.1, i / rings)})`;
+    if (r * view.zoom < 2) continue;
+    ctx.strokeStyle = `rgba(${rgb},${lerp(0.75, 0.1, i / rings)})`;
     ctx.lineWidth = 2 * px;
     ctx.beginPath();
-    ctx.arc(body.pos.x, body.pos.y, r, 0, PI2);
-    ctx.stroke();
+    if (arcPath(ctx, view, body.pos.x, body.pos.y, r)) ctx.stroke();
   }
 }
 
-function drawPlanet(ctx, p, u, zoom, px) {
+function drawPlanet(ctx, view, p, u, px) {
   const drawColor = p.explored ? p.color : COLORS.unexplored;
   ctx.strokeStyle = COLORS.orbit;
   ctx.lineWidth = px;
   ctx.beginPath();
   const c = p.orbitCenter;
-  ctx.arc(c.x, c.y, p.orbitRadius, 0, PI2);
-  ctx.stroke();
+  if (arcPath(ctx, view, c.x, c.y, p.orbitRadius)) ctx.stroke();
 
-  gravitationalField(ctx, p, u.now, px);
-  const showTex = p.explored && zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
-  drawPlanetBody(ctx, p, px, showTex, drawColor, COLORS.void);
+  gravitationalField(ctx, view, p, u.now, px);
+  const showTex = p.explored && view.zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
+  drawPlanetBody(ctx, p, view, px, showTex, drawColor, COLORS.void);
 }
 
-function drawStar(ctx, star, now, px) {
-  ctx.save();
-  ctx.translate(star.pos.x, star.pos.y);
-  gravitationalField(ctx, { pos: { x: 0, y: 0 }, mass: star.mass }, now, px);
+function drawStar(ctx, view, star, now, px) {
+  const { x, y } = star.pos;
+  gravitationalField(ctx, view, star, now, px);
+  if (!inView(view, x, y, star.radius + 300)) return;
   ctx.fillStyle = star.color;
   ctx.beginPath();
-  ctx.arc(0, 0, star.radius, 0, PI2);
-  ctx.fill();
+  if (discPath(ctx, view, x, y, star.radius)) ctx.fill();
+  ctx.save();
+  ctx.translate(x, y);
   ctx.strokeStyle = star.color;
   ctx.lineWidth = 3 * px;
   ctx.rotate((star.anim / 23) * PI2);
@@ -87,6 +90,208 @@ function drawStar(ctx, star, now, px) {
   ctx.restore();
 }
 
+// ---- black hole -------------------------------------------------------------------------
+// Looks nothing like a planet: a pure-black horizon, a thin bright photon ring, a tilted
+// glowing accretion disk whose far side is bent over and under the hole (gravitational
+// lensing), orbiting hot specks, a faint glow, and violet instead of red gravity rings.
+const DISK_RINGS = 14, DISK_TILT_RATIO = 0.26;
+const diskColor = (t, a) => `hsla(${lerp(48, 14, t)},100%,${lerp(88, 52, t)}%,${a})`;
+
+function diskHalf(ctx, rh, back, px) {
+  const inner = rh * 1.7, outer = rh * 4.6;
+  const [s, e] = back ? [Math.PI, PI2] : [0, Math.PI];
+  const [bs, be] = back ? [PI2 * 0.75, PI2] : [0, PI2 * 0.25]; // the side moving toward us is brighter
+  for (let i = 0; i < DISK_RINGS; i++) {
+    const t = i / (DISK_RINGS - 1), r = lerp(inner, outer, t), a = lerp(0.9, 0.25, t);
+    ctx.lineWidth = px * lerp(1.8, 1, t);
+    ctx.strokeStyle = diskColor(t, a * 0.55);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r, r * DISK_TILT_RATIO, 0, s, e);
+    ctx.stroke();
+    ctx.strokeStyle = diskColor(t, a);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r, r * DISK_TILT_RATIO, 0, bs, be);
+    ctx.stroke();
+  }
+}
+
+function diskSpecks(ctx, rh, now, front, px) {
+  ctx.fillStyle = '#fff4d8';
+  for (let i = 0; i < 64; i++) {
+    const t = (i * 0.6180339) % 1, r = lerp(rh * 1.7, rh * 4.6, t ** 0.8);
+    const a = i * 2.399 + now * 1.6 / (r / rh) ** 1.5;
+    const sy = Math.sin(a);
+    if ((sy > 0) !== front) continue;
+    ctx.globalAlpha = 0.9 - t * 0.5;
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * r, sy * r * DISK_TILT_RATIO, 1.6 * px, 0, PI2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBlackHole(ctx, view, bh, now, px) {
+  const rh = bh.radius, { x, y } = bh.pos;
+  gravitationalField(ctx, view, bh, now, px, '170,120,255');
+  if (!inView(view, x, y, rh * 7)) return;
+  ctx.save();
+  ctx.translate(x, y);
+  if (rh * 6 * view.zoom < 3500) { // soft glow
+    const g = ctx.createRadialGradient(0, 0, rh * 0.9, 0, 0, rh * 6);
+    g.addColorStop(0, 'rgba(255,170,70,0.30)');
+    g.addColorStop(0.35, 'rgba(255,120,30,0.10)');
+    g.addColorStop(1, 'rgba(255,100,20,0)');
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, rh * 6, 0, PI2);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.rotate(bh.tilt);
+  const showDisk = rh * 4.6 * view.zoom < 6000;
+  if (showDisk) { diskHalf(ctx, rh, true, px); diskSpecks(ctx, rh, now, false, px); }
+
+  // lensed image of the far side of the disk, bent over the top and under the bottom
+  if (showDisk) {
+    for (let i = 0; i < 4; i++) {
+      const t = i / 3;
+      ctx.lineWidth = px * lerp(2, 1, t);
+      ctx.strokeStyle = diskColor(t * 0.5, lerp(0.85, 0.3, t));
+      ctx.beginPath();
+      ctx.arc(0, 0, rh * lerp(1.18, 1.75, t), Math.PI + 0.22, PI2 - 0.22);
+      ctx.stroke();
+      ctx.strokeStyle = diskColor(t * 0.5, lerp(0.5, 0.15, t));
+      ctx.beginPath();
+      ctx.arc(0, 0, rh * lerp(1.1, 1.4, t), 0.5, Math.PI - 0.5);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(0, 0, rh, 0, PI2);
+  ctx.fill();
+  ctx.strokeStyle = '#fff4d8'; // photon ring
+  ctx.lineWidth = 2.2 * px;
+  ctx.beginPath();
+  ctx.arc(0, 0, rh * 1.03, 0, PI2);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,220,160,0.35)';
+  ctx.lineWidth = 5 * px;
+  ctx.beginPath();
+  ctx.arc(0, 0, rh * 1.09, 0, PI2);
+  ctx.stroke();
+
+  if (showDisk) { diskHalf(ctx, rh, false, px); diskSpecks(ctx, rh, now, true, px); }
+  ctx.restore();
+}
+
+// ---- asteroid belts ---------------------------------------------------------------------
+let rockShapes = null;
+function getRockShapes() {
+  if (rockShapes) return rockShapes;
+  const rng = makeRng(77);
+  rockShapes = Array.from({ length: 6 }, () => {
+    const p = new Path2D(), n = 7 + rng.int(0, 3);
+    for (let i = 0; i < n; i++) {
+      const a = (PI2 * i) / n, r = rng.range(0.6, 1);
+      if (i === 0) p.moveTo(Math.cos(a) * r, Math.sin(a) * r); else p.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    p.closePath();
+    return p;
+  });
+  return rockShapes;
+}
+
+function drawBelt(ctx, view, belt, now, px) {
+  const rr = Math.hypot(view.cx, view.cy);
+  if (Math.abs(rr - belt.radius) > belt.width / 2 + view.h + 50) return;
+  const shapes = getRockShapes();
+  ctx.strokeStyle = COLORS.rock;
+  ctx.fillStyle = COLORS.rock;
+  const dots = new Path2D();
+  const lx = view.halfW + 50, ly = view.halfH + 50;
+  // only walk the angular bins that can be on screen
+  let b0 = 0, b1 = BINS - 1;
+  if (rr > view.h + 60) {
+    const half = Math.asin(Math.min(1, (view.h + 60) / rr)), centre = Math.atan2(view.cy, view.cx) - belt.omega * now;
+    b0 = Math.floor(((centre - half) / PI2) * BINS); b1 = Math.floor(((centre + half) / PI2) * BINS);
+  }
+  for (let b = b0; b <= b1; b++) {
+    for (const i of belt.bins[((b % BINS) + BINS) % BINS]) {
+      const a = belt.angle(i, now), r = belt.r[i], s = belt.size[i];
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      if (Math.abs(x - view.cx) > lx + s || Math.abs(y - view.cy) > ly + s) continue;
+      if (s * view.zoom < 1.8) { dots.rect(x - px, y - px, 2 * px, 2 * px); continue; }
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(a * 3 + i);
+      ctx.scale(s, s);
+      ctx.lineWidth = (1.4 * px) / s;
+      ctx.stroke(shapes[belt.shape[i]]);
+      ctx.restore();
+    }
+  }
+  ctx.fill(dots);
+}
+
+// ---- warped gravity grid ----------------------------------------------------------------
+function gridWells(u, view) {
+  const out = [];
+  const add = (b, R, s) => {
+    if (Math.hypot(b.pos.x - view.cx, b.pos.y - view.cy) - R * 6 <= view.h) out.push({ x: b.pos.x, y: b.pos.y, R, s });
+  };
+  for (const w of u.wells) add(w, w.isBlackHole ? w.radius * 5 : w.radius * 3, w.isBlackHole ? 0.9 : 0.22);
+  for (const p of u.planets) if (p.radius > 900) add(p, p.radius * 3, 0.1);
+  return out;
+}
+
+const warped = { x: 0, y: 0 };
+function warp(x, y, wells) {
+  for (const w of wells) {
+    const dx = w.x - x, dy = w.y - y, d = Math.hypot(dx, dy);
+    if (d < 1e-6 || d > w.R * 6) continue;
+    const f = w.s * (w.R / (d + w.R)) ** 2; // pull points toward the mass: the grid dips into a well
+    x += dx * f; y += dy * f;
+  }
+  warped.x = x; warped.y = y;
+}
+
+function drawGrid(ctx, u, view, px) {
+  const { cx, cy, halfW, halfH } = view;
+  const left = cx - halfW, right = cx + halfW, top = cy - halfH, bottom = cy + halfH;
+  let step = 1000;
+  while (step * view.zoom < 32) step *= 10;
+  const wells = u.style.warp ? gridWells(u, view) : [];
+  ctx.strokeStyle = COLORS.grid;
+  const SEG = 56;
+  const padX = wells.length ? halfW * 0.5 : 0, padY = wells.length ? halfH * 0.5 : 0;
+  for (let x = Math.floor(left / step) * step; x < right; x += step) {
+    ctx.lineWidth = (x % (step * 10) === 0 ? 3 : 1.5) * px;
+    ctx.beginPath();
+    if (!wells.length) { ctx.moveTo(x, top); ctx.lineTo(x, bottom); } else {
+      for (let i = 0; i <= SEG; i++) {
+        warp(x, top - padY + ((bottom - top + 2 * padY) * i) / SEG, wells);
+        if (i === 0) ctx.moveTo(warped.x, warped.y); else ctx.lineTo(warped.x, warped.y);
+      }
+    }
+    ctx.stroke();
+  }
+  for (let y = Math.floor(top / step) * step; y < bottom; y += step) {
+    ctx.lineWidth = (y % (step * 10) === 0 ? 3 : 1.5) * px;
+    ctx.beginPath();
+    if (!wells.length) { ctx.moveTo(left, y); ctx.lineTo(right, y); } else {
+      for (let i = 0; i <= SEG; i++) {
+        warp(left - padX + ((right - left + 2 * padX) * i) / SEG, y, wells);
+        if (i === 0) ctx.moveTo(warped.x, warped.y); else ctx.lineTo(warped.x, warped.y);
+      }
+    }
+    ctx.stroke();
+  }
+}
+
+// ---- sparks, ships, trails ----------------------------------------------------------------
 function drawSpark(ctx, s, px) {
   if (s.life < 0) return;
   const life = 1 - s.life / s.ttl;
@@ -129,7 +334,7 @@ function drawTrail(ctx, ship, fancy, px) {
     return;
   }
   // fancy: a fading, tapering line coloured by speed (or by hull colour for other ships)
-  const B = ship.isAI ? 5 : 9;
+  const B = ship.isAI ? 4 : 8;
   const per = Math.ceil(t.length / B);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -138,7 +343,7 @@ function drawTrail(ctx, ship, fancy, px) {
     if (to - from < 2) continue;
     const f = (b + 1) / B;
     const v = t[to - 1].v;
-    const hue = ship.isAI ? ship.design.hue : 140 + 150 * Math.min(1, v / CRAFT_SPEED_LIMIT);
+    const hue = ship.isAI ? ship.design.hue ?? 200 : 140 + 150 * Math.min(1, v / CRAFT_SPEED_LIMIT);
     ctx.strokeStyle = `hsla(${hue},70%,${55 + 20 * f}%,${(ship.isAI ? 0.5 : 0.8) * f * f})`;
     ctx.lineWidth = px * (0.6 + 1.6 * f);
     ctx.beginPath();
@@ -149,17 +354,31 @@ function drawTrail(ctx, ship, fancy, px) {
   ctx.lineCap = 'butt';
 }
 
-function drawSpacecraft(ctx, ship, px, now, fancy, zoom) {
+function drawSpacecraft(ctx, u, ship, view, px, fancy) {
+  if (!inView(view, ship.pos.x, ship.pos.y, 80) && !ship.track.length) return;
   drawTrail(ctx, ship, fancy, px);
+  if (!inView(view, ship.pos.x, ship.pos.y, 80)) return;
   ctx.save();
   ctx.translate(ship.pos.x, ship.pos.y);
+  // tidal stretching toward a nearby black hole (and the final fade)
+  let alpha = 1;
+  for (const bh of u.blackHoles) {
+    const d = dist(bh.pos, ship.pos), rh = bh.radius;
+    const s = clamp(1 - (d - rh) / (4 * rh), 0, 1);
+    if (s <= 0) continue;
+    ctx.rotate(angleOf(sub(bh.pos, ship.pos)));
+    ctx.scale(1 + 3.5 * s, 1 / (1 + 2.2 * s));
+    ctx.rotate(-angleOf(sub(bh.pos, ship.pos)));
+  }
+  if (ship.consumed) alpha = 1 - clamp(ship.consumed.t / CONSUME_TIME, 0, 1) ** 2;
+  ctx.globalAlpha = alpha;
   ctx.rotate(ship.angle);
   drawShip(ctx, ship.design, {
-    thrust: ship.effThrust ?? mag(ship.thrust), now, px, transit: ship.transit,
+    thrust: ship.effThrust ?? mag(ship.thrust), now: u.now, px, transit: ship.transit,
     landed: !!ship.landing, fancy, void: COLORS.void,
   });
   ctx.restore();
-  if (ship.isAI && zoom > 0.25) { // callsign tag
+  if (ship.isAI && view.zoom > 0.25) { // callsign tag
     ctx.save();
     ctx.translate(ship.pos.x, ship.pos.y);
     ctx.scale(px, px);
@@ -198,19 +417,19 @@ function drawAutopilot(ctx, ap, now, px) {
   if (ap.assist && ap.strategy === 'ACQUIRING') { // lock-on reticle
     ctx.save();
     ctx.translate(target.pos.x, target.pos.y);
-    const r = target.radius + 30 * px + (1 - ap.lock) * 60 * px;
+    const rr = target.radius + 30 * px + (1 - ap.lock) * 60 * px;
     ctx.globalAlpha = 0.9;
     ctx.lineWidth = 2 * px;
     ctx.rotate(now * 2);
     for (let k = 0; k < 4; k++) {
       ctx.beginPath();
-      ctx.arc(0, 0, r, (k * Math.PI) / 2 + 0.15, ((k + 1) * Math.PI) / 2 - 0.15);
+      ctx.arc(0, 0, rr, (k * Math.PI) / 2 + 0.15, ((k + 1) * Math.PI) / 2 - 0.15);
       ctx.stroke();
     }
     ctx.rotate(-now * 2);
     ctx.globalAlpha = 0.6;
     ctx.beginPath();
-    ctx.arc(0, 0, r + 8 * px, -Math.PI / 2, -Math.PI / 2 + ap.lock * PI2);
+    ctx.arc(0, 0, rr + 8 * px, -Math.PI / 2, -Math.PI / 2 + ap.lock * PI2);
     ctx.stroke();
     ctx.restore();
   }
@@ -249,27 +468,17 @@ function drawLanding(ctx, l, px) {
 export function renderUniverse(ctx, u, cam, w, h, dpr) {
   const { zoom } = cam;
   const px = 1 / zoom; // one CSS pixel in world units
+  const view = makeView(cam.x, cam.y, w, h, zoom);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = COLORS.void;
   ctx.fillRect(0, 0, w * dpr, h * dpr);
 
   const s = dpr * zoom;
-  ctx.setTransform(s, 0, 0, s, (w * dpr) / 2 - cam.x * s, (h * dpr) / 2 - cam.y * s);
+  const shake = u.tidal > 0.15 ? u.tidal * 6 * dpr : 0; // the whole screen trembles near a black hole
+  const sx = shake ? (Math.random() - 0.5) * shake : 0, sy = shake ? (Math.random() - 0.5) * shake : 0;
+  ctx.setTransform(s, 0, 0, s, (w * dpr) / 2 - cam.x * s + sx, (h * dpr) / 2 - cam.y * s + sy);
 
-  const halfW = w / 2 / zoom, halfH = h / 2 / zoom;
-  const left = cam.x - halfW, right = cam.x + halfW, top = cam.y - halfH, bottom = cam.y + halfH;
-
-  let step = 1000;
-  while (step * zoom < 32) step *= 10;
-  ctx.strokeStyle = COLORS.grid;
-  for (let x = Math.floor(left / step) * step; x < right; x += step) {
-    ctx.lineWidth = (x % (step * 10) === 0 ? 3 : 1.5) * px;
-    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
-  }
-  for (let y = Math.floor(top / step) * step; y < bottom; y += step) {
-    ctx.lineWidth = (y % (step * 10) === 0 ? 3 : 1.5) * px;
-    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-  }
+  drawGrid(ctx, u, view, px);
 
   for (const l of u.landings) if (l.player) drawLanding(ctx, l, px);
 
@@ -278,17 +487,20 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
   ctx.lineWidth = px;
   ctx.setLineDash([8 * px, 8 * px]);
   ctx.beginPath();
-  ctx.arc(0, 0, UNIVERSE_RANGE, 0, PI2);
-  ctx.stroke();
+  if (arcPath(ctx, view, 0, 0, UNIVERSE_RANGE)) ctx.stroke();
   ctx.setLineDash([]);
 
-  drawStar(ctx, u.star, u.now, px);
+  for (const belt of u.belts) drawBelt(ctx, view, belt, u.now, px);
+  for (const wl of u.wells) {
+    if (wl.isBlackHole) drawBlackHole(ctx, view, wl, u.now, px);
+    else drawStar(ctx, view, wl, u.now, px);
+  }
   for (const sp of u.sparks) drawSpark(ctx, sp, px);
-  for (const p of u.planets) drawPlanet(ctx, p, u, zoom, px);
+  for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
   if (u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
   const fancy = u.style.fancy;
-  for (const s of u.ships) if (s !== u.ship) drawSpacecraft(ctx, s, px, u.now, fancy, zoom);
-  drawSpacecraft(ctx, u.ship, px, u.now, fancy, zoom);
+  for (const sh of u.ships) if (sh !== u.ship) drawSpacecraft(ctx, u, sh, view, px, fancy);
+  drawSpacecraft(ctx, u, u.ship, view, px, fancy);
 }
 
 export function drawStick(ctx, stick, dpr) {

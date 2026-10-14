@@ -86,3 +86,5 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 .act:disabled { opacity: 0.35; cursor: default; }
 .btnrow { display: flex; flex-wrap: wrap; }
 .link { color: var(--autopilot); font-size: 11px; }
+.act.picked { background: var(--autopilot); }
+.toast.bad { border-color: #ff6a55; color: #ffb4a8; }
