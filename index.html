@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#16161d">
+  <title>Perihelion</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="space"></canvas>
+  <div id="hud">
+    <pre id="catalog" class="flicker"></pre>
+    <div id="bottom">
+      <pre id="autotext"></pre>
+      <div class="row">
+        <pre id="ship" class="flicker"></pre>
+        <button id="auto" class="flicker">AUTO</button>
+      </div>
+    </div>
+  </div>
+  <button id="menubtn" class="flicker" aria-label="Menu">MENU</button>
+  <button id="rescue" hidden>OUT OF FUEL: RESCUE (-25% CR)</button>
+  <div id="toasts"></div>
+  <div id="menu" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

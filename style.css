@@ -1,0 +1,88 @@
+:root {
+  --void: #16161d;
+  --console: #b7b7ff;
+  --autopilot: #4c8df6;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; background: var(--void);
+  overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+}
+#space { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+#hud {
+  position: fixed; inset: 0; pointer-events: none; padding: 6px;
+  padding-top: max(6px, env(safe-area-inset-top)); padding-left: max(6px, env(safe-area-inset-left));
+  padding-right: max(6px, env(safe-area-inset-right)); padding-bottom: max(6px, env(safe-area-inset-bottom));
+  font: 500 12px/12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 1px; color: var(--console);
+}
+pre { margin: 0; font: inherit; white-space: pre-wrap; }
+#catalog { position: absolute; top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left));
+  bottom: 140px; right: 50%; overflow: hidden; font-size: 9px; line-height: 9px; }
+#catalog.small { font-size: 8px; line-height: 8px; }
+#bottom { position: absolute; left: 6px; right: 6px; bottom: max(6px, env(safe-area-inset-bottom)); }
+#autotext { color: var(--autopilot); margin-bottom: 6px; }
+.row { display: flex; align-items: flex-end; gap: 8px; }
+#ship { flex: 1; }
+#auto {
+  pointer-events: auto; font: inherit; letter-spacing: 1px; color: var(--console);
+  background: transparent; border: 1px solid var(--console); padding: 6px 10px; min-width: 48px; min-height: 48px; cursor: pointer;
+}
+#auto.on { background: var(--autopilot); }
+@media (min-aspect-ratio: 1/1) {
+  #bottom { left: auto; width: 45%; }
+}
+.flicker { animation: flicker 1s steps(1, end) 1 both; }
+@keyframes flicker {
+  0% { opacity: 0; } 8% { opacity: 1; } 12% { opacity: 0; } 25% { opacity: 1; } 30% { opacity: 0; }
+  45% { opacity: 1; } 50% { opacity: 0; } 70% { opacity: 1; } 100% { opacity: 1; }
+}
+
+/* ---- extras: menu, toasts, rescue ---- */
+#menubtn, #rescue, .act, .tab {
+  font: 500 12px/12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px;
+  color: var(--console); background: transparent; border: 1px solid var(--console); cursor: pointer;
+}
+#menubtn {
+  position: fixed; top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right));
+  padding: 6px 10px; min-height: 36px;
+}
+#rescue {
+  position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+  padding: 10px 14px; color: #ffb4a8; border-color: #ff6a55; background: rgba(22, 22, 29, 0.9);
+}
+#rescue[hidden], #menu[hidden] { display: none; }
+#toasts {
+  position: fixed; top: 52px; right: 8px; display: flex; flex-direction: column; gap: 6px;
+  align-items: flex-end; pointer-events: none; max-width: 80vw;
+}
+.toast {
+  font: 500 12px/14px ui-monospace, Menlo, Consolas, monospace; letter-spacing: 1px; padding: 8px 10px;
+  color: var(--console); background: rgba(22, 22, 29, 0.92); border: 1px solid var(--console);
+  animation: fadein 0.25s ease-out;
+}
+.toast.good { border-color: #4ade80; color: #b8f5cf; }
+@keyframes fadein { from { opacity: 0; transform: translateY(-4px); } }
+#menu {
+  position: fixed; inset: 0; background: rgba(22, 22, 29, 0.96); color: var(--console);
+  font: 500 12px/16px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px;
+  display: flex; flex-direction: column; padding: max(10px, env(safe-area-inset-top)) 12px 12px;
+}
+#menu .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.tab { padding: 8px 10px; min-height: 36px; }
+.tab.on { background: var(--autopilot); }
+.tab.close { margin-left: auto; }
+#menu .body { overflow-y: auto; flex: 1; max-width: 560px; width: 100%; margin: 0 auto; }
+#menu h2 { font-size: 13px; margin: 4px 0 10px; font-weight: 600; }
+.card { border: 1px solid #3c3c4f; padding: 10px; margin-bottom: 8px; }
+.card.done { opacity: 0.55; }
+.card .title { font-weight: 600; margin-bottom: 4px; }
+.dim { opacity: 0.65; margin: 4px 0; }
+.kv { display: flex; justify-content: space-between; gap: 12px; }
+.kv .k { opacity: 0.65; }
+.bar { height: 4px; background: #292936; margin: 6px 0; }
+.bar .fill { height: 100%; background: var(--autopilot); }
+.act { padding: 8px 10px; margin: 6px 6px 0 0; min-height: 36px; }
+.act:disabled { opacity: 0.35; cursor: default; }
+.btnrow { display: flex; flex-wrap: wrap; }
+.link { color: var(--autopilot); font-size: 11px; }
