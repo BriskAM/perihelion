@@ -139,10 +139,10 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');
-    card.append(el('div', 'title', `Seed ${seed}`), el('div', 'dim', 'Share this system with a friend.'));
+    card.append(el('div', 'title', typeof seed === 'string' ? seed : `Seed ${seed}`), el('div', 'dim', 'Share this system with a friend.'));
     const r = el('div', 'btnrow');
     r.append(button('SHARE LINK', actions.share), button('NEW RANDOM SYSTEM', actions.randomSeed),
-      button('TODAY’S SYSTEM', actions.dailySeed));
+      button('TODAY’S SYSTEM', actions.dailySeed), button('OUR SOLAR SYSTEM', actions.sol));
     card.append(r);
     body.append(card);
 

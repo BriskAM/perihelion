@@ -112,9 +112,11 @@ export function visual(p) {
   const rng = makeRng((p.seed ^ 0x5bd1e995) >>> 0);
   const R = p.radius;
   const small = R < 260;
+  const spec = p.spec ?? {}; // hand-made worlds (our solar system) pin their look here
   let kind;
-  if (small) kind = rng.choose(['craters', 'craters', 'cracks']);
-  else if (R > 1150 && !p.isMoon) kind = rng.choose(['gas', 'gas', 'swirl', 'continents']);
+  if (spec.kind) kind = spec.kind;
+  else if (p.gas) kind = rng.choose(['gas', 'gas', 'swirl']);
+  else if (small) kind = rng.choose(['craters', 'craters', 'cracks']);
   else kind = rng.choose(['continents', 'craters', 'ocean', 'cracks', 'swirl']);
 
   const outline = new Path2D();
@@ -124,9 +126,10 @@ export function visual(p) {
   }));
   else outline.arc(0, 0, 1, 0, PI2);
 
-  const rings = !p.isMoon && R > 600 && rng() < 0.45 * (p.ringMul ?? 1)
+  const rolled = !p.isMoon && R > 600 && rng() < 0.45 * (p.ringMul ?? 1)
     ? { inner: rng.range(1.35, 1.6), width: rng.range(0.25, 0.7), ry: rng.range(0.18, 0.38), tilt: rng.range(-0.6, 0.6) }
     : null;
+  const rings = spec.rings !== undefined ? spec.rings : rolled;
   const major = new Path2D(), minor = new Path2D();
   builders[kind](rng, major, minor);
   return (p.vis = { kind, lumpy: small, outline, rings, major, minor });
@@ -141,9 +144,9 @@ function ringEllipse(ctx, rings, R, start, end) {
 }
 
 /** Draw planet body, surface texture (if `showTex`) and rings. */
-export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
+export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now = 0) {
   const v = visual(p), R = p.radius;
-  const ringReach = v.rings ? v.rings.inner + v.rings.width : 1;
+  const ringReach = Math.max(v.rings ? v.rings.inner + v.rings.width : 1, p.atmo ? 1 + p.atmo.top / R : 1);
   if (!inView(view, p.pos.x, p.pos.y, R * ringReach)) return;
   const lumpy = v.lumpy;
   const drawRings = v.rings && R * ringReach * view.zoom < 3000; // not worth it when huge on screen
@@ -160,6 +163,17 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
     ctx.restore();
   }
 
+  if (p.atmo) { // atmosphere: a few fading shells above the surface, thicker air = brighter
+    const top = p.atmo.top, a = Math.min(0.6, 0.15 + p.atmo.rho0 * 0.5);
+    ctx.strokeStyle = p.haze ?? color;
+    ctx.lineWidth = 1.5 * px;
+    for (const k of [0.2, 0.45, 0.75, 1]) {
+      ctx.globalAlpha = a * (1.05 - k) * 0.7;
+      ctx.beginPath();
+      if (arcPath(ctx, view, p.pos.x, p.pos.y, R + top * k)) ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = voidColor;
   ctx.strokeStyle = color;
   ctx.lineJoin = 'round';
@@ -170,6 +184,7 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
     if (showTex) {
       ctx.save();
       ctx.clip(v.outline);
+      ctx.rotate((p.spin ?? 0) * now);
       ctx.lineWidth = px / R;
       ctx.stroke(v.major);
       ctx.globalAlpha = 0.45;
@@ -186,6 +201,7 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
         ctx.save();
         ctx.clip();
         ctx.translate(p.pos.x, p.pos.y);
+        ctx.rotate((p.spin ?? 0) * now);
         ctx.scale(R, R);
         ctx.lineWidth = px / R;
         ctx.stroke(v.major);
@@ -194,9 +210,11 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor) {
         ctx.restore();
       }
     }
-    ctx.lineWidth = 2 * px;
+    ctx.lineWidth = (p.gas ? 1 : 2) * px; // gas giants have no hard edge
+    ctx.globalAlpha = p.gas ? 0.6 : 1;
     ctx.beginPath();
     if (arcPath(ctx, view, p.pos.x, p.pos.y, R)) ctx.stroke();
+    ctx.globalAlpha = 1;
   }
   ctx.restore();
 

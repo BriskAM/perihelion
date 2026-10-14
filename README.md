@@ -37,6 +37,17 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
 - The autopilot always charts a course to somewhere new: it picks among uncharted worlds, weighted
   toward nearer ones, steers around stars, black holes, planets and rocks, and watches its fuel.
   (Moons of very heavy planets are left to you.)
+- **Our solar system** (`?system=sol`, or Menu > Options > Our solar system): Sun, eight planets, their
+  moons, Pluto and Charon as a binary pair, two asteroid belts, scaled to fit the game.
+- Atmospheres and gas giants: air slows you (drag grows with the square of speed) and heats you
+  (with the cube), so dive too fast and you burn up. Gas giants have no surface; skim their upper air
+  to survey them, but go deeper and the air crushes you. Thick air also cushions a landing.
+- Planets spin. Artificial satellites orbit planets, hang over a fixed spot (geostationary), or
+  coast between worlds as probes. Approach one slowly to dock for credits and fuel.
+- Real orbits: planets, moons and belts move at the speed gravity would give a free-flying ship, so
+  you can sit in a stable orbit around a planet.
+- The autopilot aerobrakes (lets thick air do part of the braking within the heating limit), hovers
+  over gas giants to survey them, routes around stars and black holes, and avoids moon swarms.
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment

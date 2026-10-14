@@ -67,7 +67,7 @@ function drawPlanet(ctx, view, p, u, px) {
 
   gravitationalField(ctx, view, p, u.now, px);
   const showTex = p.explored && view.zoom > 0.05 && dist(p.pos, u.ship.pos) < 10_000;
-  drawPlanetBody(ctx, p, view, px, showTex, drawColor, COLORS.void);
+  drawPlanetBody(ctx, p, view, px, showTex, drawColor, COLORS.void, u.now);
 }
 
 function drawStar(ctx, view, star, now, px) {
@@ -291,6 +291,51 @@ function drawGrid(ctx, u, view, px) {
   }
 }
 
+// ---- satellites ---------------------------------------------------------------------------
+const SAT_COLORS = { orbiter: '#8fc4ff', geostationary: '#ff9ad0', probe: '#a6f0a0' };
+
+function drawSatellites(ctx, u, view, px) {
+  const ship = u.ship;
+  for (const sat of u.satellites) {
+    const { x, y } = sat.pos;
+    if (sat.parent && view.zoom > 0.2) { // faint orbit track
+      ctx.strokeStyle = SAT_COLORS[sat.kind];
+      ctx.globalAlpha = 0.14;
+      ctx.lineWidth = px;
+      ctx.beginPath();
+      if (arcPath(ctx, view, sat.parent.pos.x, sat.parent.pos.y, sat.orbit)) ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (!inView(view, x, y, 60)) continue;
+    const s = Math.max(sat.radius, 4 * px);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(sat.kind === 'probe' ? angleOf(sat.velocity) : sat.angle);
+    ctx.strokeStyle = SAT_COLORS[sat.kind];
+    ctx.lineWidth = 1.4 * px;
+    ctx.beginPath(); // body and two solar panels
+    ctx.rect(-s * 0.35, -s * 0.35, s * 0.7, s * 0.7);
+    ctx.moveTo(0, -s * 0.35); ctx.lineTo(0, -s * 1.4);
+    ctx.moveTo(0, s * 0.35); ctx.lineTo(0, s * 1.4);
+    ctx.moveTo(-s * 0.55, -s * 1.4); ctx.lineTo(s * 0.55, -s * 1.4); ctx.lineTo(s * 0.55, -s * 0.9); ctx.lineTo(-s * 0.55, -s * 0.9); ctx.closePath();
+    ctx.moveTo(-s * 0.55, s * 1.4); ctx.lineTo(s * 0.55, s * 1.4); ctx.lineTo(s * 0.55, s * 0.9); ctx.lineTo(-s * 0.55, s * 0.9); ctx.closePath();
+    if (sat.kind === 'probe') { ctx.moveTo(s * 0.35, 0); ctx.lineTo(s * 1.2, 0); } // dish
+    ctx.stroke();
+    ctx.restore();
+    if (view.zoom > 0.3 || dist(sat.pos, ship.pos) < 500) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(px, px);
+      ctx.fillStyle = SAT_COLORS[sat.kind];
+      ctx.globalAlpha = sat.cooldown > 0 ? 0.4 : 0.85;
+      ctx.font = '10px ui-monospace, Menlo, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(sat.name + (sat.kind === 'geostationary' ? ' (geo)' : ''), 0, -22);
+      ctx.restore();
+    }
+  }
+}
+
 // ---- sparks, ships, trails ----------------------------------------------------------------
 function drawSpark(ctx, s, px) {
   if (s.life < 0) return;
@@ -358,6 +403,21 @@ function drawSpacecraft(ctx, u, ship, view, px, fancy) {
   if (!inView(view, ship.pos.x, ship.pos.y, 80) && !ship.track.length) return;
   drawTrail(ctx, ship, fancy, px);
   if (!inView(view, ship.pos.x, ship.pos.y, 80)) return;
+  if ((ship.heatRate ?? 0) > 0.15 && mag(ship.velocity) > 50) { // reentry plasma streaming behind the ship
+    const k = Math.min(2.5, ship.heatRate);
+    ctx.save();
+    ctx.translate(ship.pos.x, ship.pos.y);
+    ctx.rotate(angleOf(ship.velocity) + Math.PI);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 3; i++) {
+      const len = (14 + 40 * k) * (1 - i * 0.28) * (0.9 + 0.1 * Math.sin(u.now * 40 + i));
+      ctx.fillStyle = `rgba(255,${150 + i * 40},${60 + i * 50},${0.35 * Math.min(1, k)})`;
+      ctx.beginPath();
+      ctx.moveTo(6, -(10 - i * 2)); ctx.lineTo(len, 0); ctx.lineTo(6, 10 - i * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
   ctx.save();
   ctx.translate(ship.pos.x, ship.pos.y);
   // tidal stretching toward a nearby black hole (and the final fade)
@@ -495,6 +555,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr) {
     if (wl.isBlackHole) drawBlackHole(ctx, view, wl, u.now, px);
     else drawStar(ctx, view, wl, u.now, px);
   }
+  drawSatellites(ctx, u, view, px);
   for (const sp of u.sparks) drawSpark(ctx, sp, px);
   for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
   if (u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);

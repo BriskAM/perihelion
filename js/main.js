@@ -1,7 +1,7 @@
 import {
   clamp, expSmooth, lexp, dailySeed, mag, sub, angleOf, fromAngle, vec, dist,
 } from './maths.js';
-import { Universe, STAR_CLASSES, landingSpeedLimit } from './universe.js';
+import { Universe, STAR_CLASSES, landingSpeedLimit, SOL_SEED } from './universe.js';
 import { Autopilot } from './autopilot.js';
 import { renderUniverse, drawStick } from './render.js';
 import {
@@ -17,18 +17,19 @@ const MAX_ZOOM = 5;
 const STICK_MIN = 50, STICK_MAX = 100;
 
 const params = new URLSearchParams(location.search);
-const seed = Math.abs(parseInt(params.get('seed') ?? '', 10)) || dailySeed();
+const system = params.get('system') === 'sol' ? 'sol' : null; // our own solar system
+const seed = system ? SOL_SEED : Math.abs(parseInt(params.get('seed') ?? '', 10)) || dailySeed();
 
 const state = loadSave();
 writeSave(state); // persist defaults so they stay stable
-const universe = new Universe(seed, { shipModel: state.shipModel });
+const universe = new Universe(seed, { shipModel: state.shipModel, system });
 const autopilot = new Autopilot(universe.ship, universe);
 universe.ship.autopilot = autopilot;
 universe.entities.push(autopilot);
 if (params.has('auto')) autopilot.enabled = true;
 
 // ---- extras: saved progress, fuel, missions, codex ----
-const seedKey = String(seed);
+const seedKey = system ?? String(seed);
 for (const idx of state.explored[seedKey] ?? []) {
   if (universe.planets[idx]) universe.planets[idx].explored = true;
 }
@@ -51,7 +52,7 @@ let dirty = false;
 const persist = () => { writeSave(state); dirty = false; };
 
 const ui = createUI({
-  state, universe, missions, seed,
+  state, universe, missions, seed: system === 'sol' ? 'Sol, our solar system' : seed,
   actions: {
     buy(id) {
       const lvl = state.upgrades[id], cost = UPGRADES[id].cost(lvl);
@@ -66,12 +67,13 @@ const ui = createUI({
       state.options[key] = value; applyShip(); persist(); ui.render();
     },
     share() {
-      const url = `${location.origin}${location.pathname}?seed=${seed}`;
+      const url = `${location.origin}${location.pathname}${system ? '?system=sol' : `?seed=${seed}`}`;
       if (navigator.share) navigator.share({ title: 'Perihelion', url }).catch(() => {});
       else navigator.clipboard?.writeText(url).then(() => ui.toast('Link copied')).catch(() => ui.toast(url));
     },
     randomSeed() { location.search = `?seed=${1 + Math.floor(Math.random() * 9_999_999)}`; },
     dailySeed() { location.search = ''; },
+    sol() { location.search = '?system=sol'; },
     reset() { resetSave(); location.reload(); },
     setModel(id) {
       state.shipModel = id;
@@ -81,7 +83,7 @@ const ui = createUI({
   },
 });
 
-universe.onLanded = (planet, { rescue, first }) => {
+universe.onLanded = (planet, { rescue, first, survey }) => {
   if (!first || rescue) return;
   const idx = universe.planets.indexOf(planet);
   (state.explored[seedKey] ??= []).push(idx);
@@ -90,7 +92,7 @@ universe.onLanded = (planet, { rescue, first }) => {
     fauna: planet.fauna, flora: planet.flora, t: Date.now(),
   });
   state.credits += 50;
-  ui.toast(`DISCOVERED ${planet.name.toUpperCase()}  +50 CR`);
+  ui.toast(`${survey ? 'SURVEYED' : 'DISCOVERED'} ${planet.name.toUpperCase()}  +50 CR`);
   for (const [count, title] of MILESTONES) {
     if (state.codex.length >= count && !state.milestones.includes(title)) {
       state.milestones.push(title);
@@ -157,8 +159,15 @@ function respawnPlayer(message, farFrom) {
   persist();
 }
 universe.onConsumed = () => respawnPlayer('LOST TO THE SINGULARITY: -25% credits', universe.blackHoles);
-universe.onDestroyed = (ship, { planet, speed }) =>
-  respawnPlayer(`CRASHED ON ${planet.name.toUpperCase()} AT ${Math.round(speed)}: -25% credits`, []);
+universe.onDestroyed = (ship, { planet, speed, reason }) =>
+  respawnPlayer(reason === 'crashed' || !reason
+    ? `CRASHED ON ${planet.name.toUpperCase()} AT ${Math.round(speed)}: -25% credits`
+    : `${reason.toUpperCase()} AT ${planet.name.toUpperCase()}: -25% credits`, []);
+universe.onServiced = (sat) => {
+  state.credits += 10;
+  ui.toast(`DOCKED WITH ${sat.name.toUpperCase()}: +10 CR${universe.fuel.on ? ', +15 fuel' : ''}`, 'good');
+  persist();
+};
 universe.onImpact = ({ planet, speed, safe, damage }) =>
   ui.toast(`HARD LANDING on ${planet.name.toUpperCase()}: ${Math.round(speed)} (limit ${Math.round(safe)})` +
     (universe.fuel.on ? `  -${Math.round(damage)} fuel` : ''), 'bad');
@@ -281,8 +290,22 @@ function updateHud() {
     ? `!! TIDAL ${Math.round(u.tidal * 100)}%  TIME x${u.timeScale.toFixed(2)} !!`
     : near && near.d < near.bh.radius * 14 ? `HOLE: ${Math.round(near.d - near.bh.radius)} TO HORIZON` : null;
   rescueBtn.hidden = !(f.on && f.level <= 0 && !ship.landing);
+  const reentry = ship.heatRate > 0.08
+    ? `REENTRY: ${Math.round(ship.heat * 100)}%  (${Math.round((ship.heatRate / 0.8) * 100)}% of the safe heating)`
+    : ship.atmoRho > 0.005 ? `AIR: ${ship.atmoRho.toFixed(2)}${ship.atmoPlanet && ship.atmoPlanet.gas ? '  (gas giant)' : ''}` : null;
+  let satLine = null, bestSat = 400;
+  for (const s of u.satellites) {
+    const d = dist(s.pos, ship.pos);
+    if (d < bestSat) {
+      bestSat = d;
+      const r = Math.round(mag(sub(ship.velocity, s.velocity)));
+      satLine = `SAT: ${s.name} ${Math.round(d)}  REL ${r}${r < 90 && d < 120 ? (s.cooldown > 0 ? '  (recharging)' : '  DOCK!') : ''}`;
+    }
+  }
   const text = [
     first,
+    reentry,
+    satLine,
     holeLine,
     fuelLine,
     `CR:  ${state.credits}`,

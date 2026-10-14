@@ -4,6 +4,8 @@ import {
 import { Namer } from './namer.js';
 import { makeDesign, randomDesign, makeCallsign } from './ships.js';
 import { Autopilot } from './autopilot.js';
+import { SOL } from './sol.js';
+import { rollPhysics, makeAtmosphere, densityAt, DRAG_COEFF, HEAT_COEFF, HEAT_SAFE } from './planets.js';
 
 export const UNIVERSE_RANGE = 200_000;
 export const NUM_PLANETS_RANGE = [1, 10];
@@ -12,16 +14,20 @@ export const PLANET_RADIUS_RANGE = [50, 2_000];
 export const PLANET_ORBIT_RANGE = [STAR_RADIUS_RANGE[1] * 2, UNIVERSE_RANGE * 0.75];
 
 export const GRAVITATION = 1e-2;
-export const KEPLER_CONSTANT = 50;
 export const PLANETARY_DENSITY = 2.5;
 export const STELLAR_DENSITY = 0.5;
 export const SPACECRAFT_MASS = 10;
+// Chosen so that rail orbits move at exactly the speed gravity would give a free-flying ship
+// (circular speed = sqrt(G * shipMass * M / r)). The original used 50, which made planets crawl
+// compared with a ship in the same field; consistency is what lets ships orbit planets.
+export const KEPLER_CONSTANT = (2 * Math.PI) / Math.sqrt(GRAVITATION * SPACECRAFT_MASS);
 export const CRAFT_SPEED_LIMIT = 5_000;
 export const MAIN_ENGINE_ACCEL = 1000;
 export const LAUNCH_MECO = 2; // seconds of no gravity after launch
 export const LANDING_REMOVAL_TIME = 60 * 15;
 export const MAX_VALID_DT = 1;
 export const BH_MASS = 4e10; // pull at 4 horizon radii is about what the engine can match
+export const SOL_SEED = 100_000_001;
 export const CONSUME_TIME = 2.2; // seconds of spaghettification before the ship is lost
 const TRACK_LENGTH = 2400; // trail points (one every TRACK_INTERVAL of sim time)
 const TRACK_INTERVAL = 0.05;
@@ -40,9 +46,10 @@ export const STAR_COLORS = {
  */
 export function landingSpeedLimit(p) {
   const surfaceG = (GRAVITATION * SPACECRAFT_MASS * p.mass) / (p.radius * p.radius);
-  return 150 + 0.45 * surfaceG;
+  return (150 + 0.45 * surfaceG) * (1 + 0.6 * (p.atmo?.rho0 ?? 0)); // thick air cushions a landing
 }
 
+const keplerOmega = (orbit, mass) => PI2 / (Math.sqrt(orbit ** 3 / mass) * KEPLER_CONSTANT);
 const keplerSpeed = (orbit, mass) => (PI2 * orbit) / (Math.sqrt(orbit ** 3 / mass) * KEPLER_CONSTANT);
 
 class Body {
@@ -125,12 +132,12 @@ export class BlackHole extends Star {
  * the rocks are, and whether it is denser in the middle.
  */
 export class Belt {
-  constructor(radius, width, omega, rng) {
+  constructor(radius, width, omega, rng, fixed = {}) {
     this.radius = radius; this.width = width; this.omega = omega;
-    this.spacing = rng.range(130, 520); // typical gap between rocks: small = dense field
-    this.sizeScale = rng.range(0.6, 1.7);
-    this.clumpy = rng() < 0.5 ? rng.range(0.3, 0.6) : 0; // share of rocks gathered in clumps
-    this.peaked = rng() < 0.5; // denser toward the middle of the band
+    this.spacing = fixed.spacing ?? rng.range(130, 520); // typical gap between rocks: small = dense field
+    this.sizeScale = fixed.sizeScale ?? rng.range(0.6, 1.7);
+    this.clumpy = fixed.clumpy ?? (rng() < 0.5 ? rng.range(0.3, 0.6) : 0); // share of rocks gathered in clumps
+    this.peaked = fixed.peaked ?? rng() < 0.5; // denser toward the middle of the band
     this.maxSize = 46 * this.sizeScale;
     // always leave gaps to fly through, even inside the thickest clumps (which are denser than the rest)
     this.spacing = Math.max(this.spacing, (60 + 100 * this.sizeScale) * Math.sqrt(1 + 5 * this.clumpy));
@@ -158,6 +165,46 @@ export class Belt {
   angle(i, now) { return this.phase[i] + this.omega * now; }
 }
 
+/**
+ * Artificial objects on rails. kind: 'orbiter' circles a planet, 'geostationary' circles at the
+ * radius where it keeps pace with the planet's spin (so it hangs over one spot), 'probe' flies
+ * between worlds (or out of the system). Ships can dock with a satellite by approaching slowly.
+ */
+export class Satellite {
+  constructor({ name, kind, parent = null, orbit = 0, phase = 0, dir = 1, dest = null, speed = 0, outbound = false }) {
+    this.name = name; this.kind = kind; this.parent = parent; this.orbit = orbit; this.dir = dir;
+    this.angle = phase; this.dest = dest; this.speed = speed; this.outbound = outbound;
+    this.radius = 7;
+    this.cooldown = 0; // sim time until it can service a ship again
+    this.pos = vec(); this.velocity = vec();
+    this.omega = parent ? dir * keplerOmega(orbit, parent.mass) : 0;
+    if (kind === 'geostationary') this.omega = parent.spin;
+    if (parent) this.update(null, 0);
+  }
+  update(sim, dt) {
+    if (this.cooldown > 0 && sim) this.cooldown -= dt;
+    if (this.parent) {
+      this.angle += this.omega * dt;
+      const p = this.parent;
+      this.pos = add(p.pos, fromAngle(this.angle, this.orbit));
+      this.velocity = add(p.velocity, fromAngle(this.angle + (this.omega >= 0 ? Math.PI / 2 : -Math.PI / 2), Math.abs(this.omega) * this.orbit));
+      return;
+    }
+    // probe: coast in a straight line toward the destination, then pick another one
+    this.pos = add(this.pos, mul(this.velocity, dt));
+    if (this.outbound) {
+      if (mag(this.pos) > UNIVERSE_RANGE * 0.97) { // out of the system: start over from the inside
+        this.pos = fromAngle(this.angle, 15_000);
+        this.velocity = fromAngle(this.angle, this.speed);
+      }
+    } else if (this.dest && sim && dist(this.pos, this.dest.pos) < this.dest.radius * 1.5 + 250) {
+      const choices = sim.planets.filter((q) => !q.isMoon && q !== this.dest);
+      this.dest = choices[Math.floor(sim.rng() * choices.length)] ?? this.dest;
+      this.velocity = mul(sub(this.dest.pos, this.pos), this.speed / Math.max(1, dist(this.dest.pos, this.pos)));
+    }
+  }
+}
+
 export class Spark extends Body {
   constructor({ ttl, style = 'line', color = '#888', size = 2, collides = false, mass = 0 }) {
     super('Spark');
@@ -175,6 +222,7 @@ export class Landing {
   }
   solve(sim, dt) {
     const ship = this.ship;
+    this.angle += (this.planet.spin ?? 0) * dt; // the surface turns beneath the parked ship
     if (ship) {
       const desired = add(this.planet.pos, fromAngle(this.angle, ship.radius + this.planet.radius));
       ship.pos = add(mul(ship.pos, 0.5), mul(desired, 0.5));
@@ -199,6 +247,8 @@ export class Spacecraft extends Body {
     this.autopilot = null;
     this.consumed = null; // set while a black hole is eating the ship
     this.hitCooldown = 0;
+    this.heat = 0; // 0..1: reentry heating; at 1 the ship burns up
+    this.surveyT = 0;
     this.isAI = false;
     this.mass = SPACECRAFT_MASS;
     this.radius = 12;
@@ -262,11 +312,11 @@ export class Spacecraft extends Body {
 }
 
 export class Universe {
-  constructor(seed, { shipModel = 'dart' } = {}) {
+  constructor(seed, { shipModel = 'dart', system = null } = {}) {
     this.randomSeed = seed;
     this.rng = makeRng(seed);
     this.namer = new Namer();
-    this.now = 0; this.dt = 0; this.frameDt = 0; this._wall = 0;
+    this.now = LAUNCH_MECO + 1; this.dt = 0; this.frameDt = 0; this._wall = 0; // (start past the launch-gravity-off window)
     this.timeScale = 1; // below 1 near a black hole
     this.tidal = 0; // 0..1 stress on the player's ship near a black hole
     this.planets = []; // planets first (sorted by orbit), then partners and moons
@@ -275,6 +325,8 @@ export class Universe {
     this.blackHoles = [];
     this.wells = []; // stars + black holes: sources of the big gravity wells
     this.belts = [];
+    this.satellites = [];
+    this.systemId = system; // 'sol' for our own solar system
     this.systemType = 'normal';
     this.sparks = [];
     this.landings = [];
@@ -288,7 +340,8 @@ export class Universe {
     this.onConsumed = null; // (ship) => void; the player's ship was lost to a black hole
     this.onDestroyed = null; // (ship, { planet, speed }) => void; the player crashed
     this.onImpact = null; // ({ planet, speed, safe, damage }) => void; a hard (survivable) landing
-    this.initRandom(shipModel);
+    this.onServiced = null; // (satellite) => void; docked with a satellite
+    if (system === 'sol') this.initSol(shipModel); else this.initRandom(shipModel);
   }
 
   // orbital speed around the whole system's mass
@@ -342,17 +395,190 @@ export class Universe {
     ship.pos = this.outsideBelts(ship.pos);
     this.wells = [...this.stars, ...this.blackHoles.filter((b) => !this.stars.includes(b))];
     this._bodies = [...this.planets, ...this.wells];
+    const prng = makeRng((this.randomSeed ^ 0xa7305) >>> 0);
+    for (const p of this.planets) rollPhysics(p, prng);
+    this.computeHillSpheres();
+    this.satellites = this.makeSatellites();
     this.spawnAI();
+  }
+
+  /**
+   * Planets ride rails, so they never feel each other's pull while ships do. Near a planet that
+   * shows up as constant nudges from Jupiter and friends that no real orbit would suffer (the star's
+   * own pull is already matched by the rail speeds). Inside a planet's Hill sphere we work in the
+   * planet's frame: subtract the field everything else makes at the planet, add back what the rail
+   * really accelerates it at, and fade that out toward the edge of the sphere.
+   */
+  computeHillSpheres() {
+    for (const p of this.planets) {
+      const group = p.parent && p.parent.isAnchor;
+      const a = group ? p.parent.orbitRadius : p.orbitRadius;
+      const central = group || !p.parent ? this.totalMass : p.parent.mass;
+      const m = group && p.binary ? p.mass + p.binary.mass : p.mass;
+      p.hill = a * Math.cbrt(m / (3 * central));
+    }
+  }
+
+  /** Acceleration of each rail body (centripetal, plus its parent's), refreshed every step. */
+  updateRailAccelerations() {
+    const centripetal = (p) => {
+      if (!p.speed) return vec();
+      const c = p.orbitCenter, d = dist(c, p.pos) || 1;
+      return mul(sub(c, p.pos), (p.speed * p.speed) / (d * d));
+    };
+    for (const a of this.anchors) a.acc = centripetal(a);
+    for (const p of this.planets) p.acc = p.parent ? add(p.parent.acc ?? vec(), centripetal(p)) : centripetal(p);
+  }
+
+  /** What to subtract from a ship's acceleration at `pos` (null outside every Hill sphere). */
+  frameAcceleration(pos) {
+    let best = null, bestHill = Infinity;
+    for (const p of this.planets) {
+      if (p.hill >= bestHill) continue;
+      if (Math.hypot(pos.x - p.pos.x, pos.y - p.pos.y) < p.hill * 1.2) { best = p; bestHill = p.hill; }
+    }
+    if (!best) return null;
+    const d = Math.hypot(pos.x - best.pos.x, pos.y - best.pos.y);
+    const w = d < best.hill * 0.9 ? 1 : clamp(1 - (d - best.hill * 0.9) / (best.hill * 0.3), 0, 1);
+    let ax = 0, ay = 0;
+    for (const b of this._bodies) {
+      if (b === best) continue;
+      const dx = b.pos.x - best.pos.x, dy = b.pos.y - best.pos.y, r2 = dx * dx + dy * dy;
+      if (r2 < 1) continue;
+      const g = (GRAVITATION * SPACECRAFT_MASS * b.mass) / r2, r = Math.sqrt(r2);
+      ax += (dx / r) * g; ay += (dy / r) * g;
+    }
+    const rail = best.acc ?? vec();
+    return vec((ax - rail.x) * w, (ay - rail.y) * w);
+  }
+
+  /** Our own solar system, hand-made (see sol.js). */
+  initSol(shipModel) {
+    const rng = this.rng;
+    const star = new Star(SOL.star.cls, SOL.star.radius);
+    star.name = 'Sol';
+    this.star = star; this.stars = [star]; this.totalMass = star.mass;
+    this.systemType = 'sol';
+    this.profile = { name: 'ordinary', moonChance: 1, ringMul: 1, beltChance: 1, pairChance: 0, satChance: 0.3, ai: [3, 3] };
+    this.minOrbit = 14_000;
+
+    const give = (p, spec) => {
+      p.name = spec.name; p.description = spec.description; p.atmosphere = spec.atmosphere;
+      p.fauna = spec.fauna; p.flora = spec.flora; p.spec = spec.spec; p.haze = spec.haze;
+      p.spin = spec.spin ?? 0.03;
+      p.isMoon = !!p.parent;
+      if (spec.gas) { p.gas = true; p.collides = false; p.atmo = makeAtmosphere(0.35, spec.R * 0.1); }
+      else if (spec.atmo) p.atmo = makeAtmosphere(spec.atmo[0], spec.atmo[1]);
+    };
+    const parents = [], moons = [], partners = [];
+    for (const spec of SOL.planets) {
+      const phase = rng() * PI2;
+      const p = new Planet(star.pos, spec.R, add(star.pos, fromAngle(phase, spec.orbit)), keplerSpeed(spec.orbit, star.mass), spec.color);
+      give(p, spec);
+      p.beltOrbit = spec.orbit;
+      if (spec.geo) p.spin = keplerOmega(p.radius * spec.geo, p.mass); // geostationary radius fixes the day
+      parents.push(p);
+      for (const m of spec.moons ?? []) {
+        const mm = new Planet(p.pos, m.R, add(p.pos, fromAngle(rng() * PI2, m.orbit)), keplerSpeed(m.orbit, p.mass), m.color, p);
+        give(mm, m);
+        moons.push(mm);
+      }
+      if (spec.pair) { // Pluto and Charon: two worlds circling a point that circles the Sun
+        const q = spec.pair, r2 = q.R, m1 = p.mass, m2 = (4 / 3) * Math.PI * r2 ** 3 * PLANETARY_DENSITY;
+        const omega = keplerOmega(q.sep, m1 + m2), d1 = (q.sep * m2) / (m1 + m2), d2 = (q.sep * m1) / (m1 + m2), ph = rng() * PI2;
+        const anchor = new Planet(star.pos, 0, p.pos, p.speed);
+        anchor.mass = 0; anchor.isAnchor = true; anchor.orbitRadius = p.orbitRadius;
+        this.anchors.push(anchor);
+        p.parent = anchor; p.isMoon = false; p.orbitRadius = d1; p.speed = omega * d1; p.pos = p.opos = add(anchor.pos, fromAngle(ph, d1));
+        const c = new Planet(anchor.pos, r2, add(anchor.pos, fromAngle(ph + Math.PI, d2)), omega * d2, q.color, anchor);
+        give(c, q); c.isMoon = false; c.parent = anchor;
+        p.binary = c; c.binary = p;
+        partners.push(c);
+      }
+    }
+    this.planets = [...parents, ...partners, ...moons];
+    const byName = (n) => this.planets.find((p) => p.name === n);
+
+    const ship = new Spacecraft(makeDesign(shipModel));
+    ship.name = 'You';
+    const earth = byName('Earth');
+    const alt = 330, r = earth.radius + alt; // a low parking orbit
+    const orbitV = Math.sqrt((GRAVITATION * SPACECRAFT_MASS * earth.mass) / r);
+    const ea = angleOf(sub(earth.pos, star.pos));
+    ship.pos = ship.opos = add(earth.pos, fromAngle(ea, r));
+    ship.velocity = add(fromAngle(ea + Math.PI / 2, earth.speed), fromAngle(ea + Math.PI / 2, orbitV)); // a circular parking orbit
+    ship.angle = ea + Math.PI / 2;
+    this.ship = ship; this.follow = ship; this.ships.push(ship);
+
+    this.belts = SOL.belts.map((b) => new Belt(b.radius, b.width, keplerOmega(b.radius, star.mass), rng, b.fixed));
+    this.wells = [star];
+    this._bodies = [...this.planets, star];
+
+    for (const s of SOL.satellites) {
+      let sat;
+      if (s.kind === 'probe') {
+        sat = new Satellite({ name: s.name, kind: 'probe', outbound: !!s.outbound, speed: s.speed, phase: s.angle ?? 0, dest: s.dest ? byName(s.dest) : null });
+        if (s.outbound) { sat.pos = fromAngle(s.angle, 20_000 + rng() * 30_000); sat.velocity = fromAngle(s.angle, s.speed); }
+        else { const from = byName(s.from); sat.pos = add(from.pos, fromAngle(1, from.radius + 200)); sat.velocity = mul(sub(sat.dest.pos, sat.pos), s.speed / dist(sat.dest.pos, sat.pos)); }
+      } else {
+        const p = byName(s.at), top = p.atmo ? p.atmo.top : 0;
+        const orbit = s.kind === 'geostationary' ? p.radius * SOL.planets.find((q) => q.name === s.at).geo : p.radius + Math.max(s.alt, top + 60);
+        sat = new Satellite({ name: s.name, kind: s.kind, parent: p, orbit, phase: s.phase });
+      }
+      this.satellites.push(sat);
+    }
+    this.computeHillSpheres();
+    this.spawnAI();
+  }
+
+  /** Artificial objects: orbiters, geostationary relays and probes heading somewhere. */
+  makeSatellites() {
+    const chance = this.profile.satChance;
+    if (!chance) return [];
+    const rng = makeRng((this.randomSeed ^ 0x5a7e111) >>> 0);
+    const sats = [];
+    const name = () => `${rng.choose(['Relay', 'Beacon', 'Watcher', 'Survey', 'Link'])}-${rng.int(2, 99)}`;
+    for (const p of this.planets) {
+      if (p.radius < 100 || rng() > chance) continue;
+      const count = rng.int(1, 4);
+      const top = p.atmo ? p.atmo.top : 0;
+      const geoR = Math.max(p.radius + top + 120, p.radius * rng.range(1.5, 2.1));
+      let geo = false;
+      for (let k = 0; k < count; k++) {
+        if (p.atmo && !p.gas && !geo && rng() < 0.35) { // park one over a fixed spot of this world
+          geo = true;
+          p.spin = keplerOmega(geoR, p.mass) * (p.spin < 0 ? -1 : 1);
+          sats.push(new Satellite({ name: name(), kind: 'geostationary', parent: p, orbit: geoR, phase: rng() * PI2 }));
+          continue;
+        }
+        const orbit = p.radius + top + rng.range(70, p.gas ? p.radius * 0.6 : Math.max(120, p.radius * 0.9));
+        sats.push(new Satellite({ name: name(), kind: 'orbiter', parent: p, orbit, phase: rng() * PI2, dir: rng() < 0.2 ? -1 : 1 }));
+      }
+    }
+    const worlds = this.planets.filter((q) => !q.isMoon);
+    for (let k = rng.int(0, 3); k > 0 && worlds.length; k--) {
+      const start = this.safeSpot(rng), speed = rng.range(350, 900);
+      if (rng() < 0.35) {
+        const a = angleOf(start);
+        sats.push(new Satellite({ name: `Probe-${rng.int(2, 99)}`, kind: 'probe', outbound: true, speed, phase: a }));
+        sats[sats.length - 1].pos = start; sats[sats.length - 1].velocity = fromAngle(a, speed);
+      } else {
+        const dest = rng.choose(worlds), sat = new Satellite({ name: `Probe-${rng.int(2, 99)}`, kind: 'probe', dest, speed });
+        sat.pos = start; sat.velocity = mul(sub(dest.pos, start), speed / Math.max(1, dist(dest.pos, start)));
+        sats.push(sat);
+      }
+    }
+    return sats;
   }
 
   /** Each system has a character, so not every feature shows up in every system. */
   makeProfile() {
     const rng = makeRng((this.randomSeed ^ 0x9f0f11e) >>> 0);
     const kinds = [
-      [20, { name: 'barren', moonChance: 0.25, ringMul: 0.3, beltChance: 0.2, pairChance: 0.15, ai: [0, 2] }],
-      [40, { name: 'ordinary', moonChance: 0.75, ringMul: 1, beltChance: 0.6, pairChance: 0.35, ai: [2, 4] }],
-      [20, { name: 'crowded', moonChance: 1, ringMul: 1.4, beltChance: 0.9, pairChance: 0.5, ai: [3, 6] }],
-      [20, { name: 'deserted', moonChance: 0.5, ringMul: 0.6, beltChance: 0.5, pairChance: 0.3, ai: [0, 0] }],
+      [20, { name: 'barren', moonChance: 0.25, ringMul: 0.3, beltChance: 0.2, pairChance: 0.15, satChance: 0.1, ai: [0, 2] }],
+      [40, { name: 'ordinary', moonChance: 0.75, ringMul: 1, beltChance: 0.6, pairChance: 0.35, satChance: 0.3, ai: [2, 4] }],
+      [20, { name: 'crowded', moonChance: 1, ringMul: 1.4, beltChance: 0.9, pairChance: 0.5, satChance: 0.6, ai: [3, 6] }],
+      [20, { name: 'deserted', moonChance: 0.5, ringMul: 0.6, beltChance: 0.5, pairChance: 0.3, satChance: 0, ai: [0, 0] }],
     ];
     let x = rng() * 100;
     for (const [w, k] of kinds) { x -= w; if (x < 0) return k; }
@@ -611,9 +837,12 @@ export class Universe {
         f.level = Math.max(0, f.level - 8 * dt);
       }
     }
+    this.updateRailAccelerations();
     for (const s of this.ships) {
       if (s.consumed) continue;
       s.transit = false;
+      const frame = this.now > s.launchClock + LAUNCH_MECO ? this.frameAcceleration(s.pos) : null;
+      if (frame) s.velocity = sub(s.velocity, mul(frame, dt));
       for (const body of this._bodies) {
         const vector = sub(body.pos, s.pos);
         const d = mag(vector);
@@ -626,6 +855,7 @@ export class Universe {
         }
       }
     }
+    for (const s of this.ships) if (!s.consumed) this.atmosphere(s, dt);
     for (const e of this.entities) e.update(this, dt);
     for (const a of this.anchors) a.update(this, dt);
     for (const p of this.planets) p.update(this, dt);
@@ -643,10 +873,56 @@ export class Universe {
     for (const s of this.ships) s.postUpdate(this, dt);
     for (const s of this.sparks) s.postUpdate(this, dt);
 
+    for (const sat of this.satellites) sat.update(this, dt);
     this.sparks = this.sparks.filter((s) => !s.dead);
     this.landings = this.landings.filter((l) => !l.dead);
     this.updateBlackHoleEffects(raw);
     return true;
+  }
+
+  /**
+   * Air resistance and reentry heating. Drag grows with density (which rises steeply toward the
+   * surface) and with the square of the speed relative to the rotating air; heating grows with
+   * the cube. Gas giants have no surface: the air just keeps getting thicker until you burn up.
+   */
+  atmosphere(ship, dt) {
+    let heatRate = 0;
+    ship.atmoRho = 0;
+    for (const p of this.planets) {
+      const a = p.atmo;
+      if (!a) continue;
+      const dx = ship.pos.x - p.pos.x, dy = ship.pos.y - p.pos.y, d = Math.hypot(dx, dy) || 1;
+      const alt = d - p.radius;
+      if (alt > a.top) continue;
+      if (p.gas && alt < -p.radius * 0.5) { this.destroyShip(ship, p, mag(ship.velocity), 'crushed'); return; }
+      if (ship.landing) { ship.heat = 0; continue; }
+      const rho = a.rho0 * Math.exp(-alt / a.H);
+      const spin = (p.spin ?? 0) * d; // the air turns with the planet
+      const wind = add(p.velocity, vec((-dy / d) * spin, (dx / d) * spin));
+      const rel = sub(ship.velocity, wind), v = mag(rel);
+      if (v > 1e-6) {
+        const decel = Math.min(DRAG_COEFF * rho * v * v * dt, v);
+        ship.velocity = sub(ship.velocity, mul(rel, decel / v));
+      }
+      heatRate = Math.max(heatRate, HEAT_COEFF * rho * v ** 3);
+      ship.atmoRho = rho; ship.atmoPlanet = p;
+      // a gas giant survey: skim its upper air for a moment
+      if (p.gas && !ship.isAI && alt < a.top * 0.9 && ship.heat < 0.6) {
+        ship.surveyT += dt;
+        if (ship.surveyT > 0.4 && !p.explored) this.survey(p);
+      } else if (p.gas) ship.surveyT = 0;
+    }
+    const over = Math.max(0, heatRate - HEAT_SAFE);
+    ship.heat = clamp(ship.heat + (over * 0.8 - (over > 0 ? 0 : 0.25)) * dt, 0, 1);
+    ship.heatRate = heatRate;
+    if (ship.heat >= 1) this.destroyShip(ship, ship.atmoPlanet ?? this.planets[0], mag(ship.velocity), 'burned up');
+  }
+
+  // a gas giant has no surface to land on: flying through its upper air counts as visiting
+  survey(planet) {
+    planet.explored = true;
+    this.latestDiscovery = planet;
+    if (this.onLanded) this.onLanded(planet, { rescue: false, first: true, survey: true });
   }
 
   // slow motion + tidal stress for the player, and the spiral into the singularity
@@ -714,6 +990,7 @@ export class Universe {
         }
       }
       this.collideBelts(ship, dt);
+      this.dockWithSatellites(ship, dt);
     }
     for (const l of this.landings) l.solve(this, dt);
     // ringfence
@@ -732,7 +1009,8 @@ export class Universe {
     if (!ship.isAI && this.onImpact) this.onImpact({ planet, speed, safe, damage });
   }
 
-  destroyShip(ship, planet, speed) {
+  destroyShip(ship, planet, speed, reason = 'crashed') {
+    ship.heat = 0;
     const at = ship.pos;
     for (let k = 0; k < 30 && this.sparks.length < MAX_SPARKS; k++) {
       const s = new Spark({ ttl: this.rng.range(0.6, 2.2), style: 'dot', color: '#ffb060', size: 1.5 });
@@ -741,8 +1019,29 @@ export class Universe {
       this.sparks.push(s);
     }
     if (ship.isAI) this.respawnAI(ship);
-    else if (this.onDestroyed) this.onDestroyed(ship, { planet, speed });
+    else if (this.onDestroyed) this.onDestroyed(ship, { planet, speed, reason });
     else ship.velocity = vec();
+  }
+
+  // Approach a satellite slowly to dock (refuel + credits, then it needs a while to recharge);
+  // hit one fast and you just bounce off.
+  dockWithSatellites(ship, dt) {
+    if (ship.landing) return;
+    for (const sat of this.satellites) {
+      const dx = ship.pos.x - sat.pos.x, dy = ship.pos.y - sat.pos.y;
+      if (Math.abs(dx) > 120 || Math.abs(dy) > 120) continue;
+      const d = Math.hypot(dx, dy), rel = mag(sub(ship.velocity, sat.velocity));
+      if (d < 45 && rel < 90 && sat.cooldown <= 0 && !ship.isAI) {
+        sat.cooldown = 90;
+        if (this.fuel.on) this.fuel.level = Math.min(this.fuel.capacity, this.fuel.level + 15);
+        if (this.onServiced) this.onServiced(sat);
+      } else if (d < sat.radius + ship.radius && rel >= 90) {
+        const n = d || 1, nx = dx / n, ny = dy / n;
+        ship.pos = vec(sat.pos.x + nx * (sat.radius + ship.radius), sat.pos.y + ny * (sat.radius + ship.radius));
+        const rv = sub(ship.velocity, sat.velocity), into = rv.x * nx + rv.y * ny; // bounce, softly
+        if (into < 0 && dt > 0) ship.opos = sub(ship.pos, mul(add(sat.velocity, sub(rv, mul(vec(nx, ny), 1.4 * into))), dt));
+      }
+    }
   }
 
   /** Call fn(x, y, size, belt, index) for every belt rock within `range` of `pos`. */

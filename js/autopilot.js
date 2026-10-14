@@ -4,6 +4,7 @@ import {
 import {
   MAIN_ENGINE_ACCEL, CRAFT_SPEED_LIMIT, GRAVITATION, SPACECRAFT_MASS, landingSpeedLimit,
 } from './universe.js';
+import { densityAt, heatSafeSpeed, DRAG_COEFF } from './planets.js';
 
 const BRAKING_TIME = 5;
 const LAUNCH_THRUST_TIME = 5;
@@ -73,13 +74,14 @@ export class Autopilot {
 
   nearest(list) {
     const ship = this.ship;
+    if (!list.length) list = this.universe.planets.filter((p) => !p.gas).concat(this.universe.planets);
     return list.slice().sort((a, b) => mag(sub(a.pos, ship.pos)) - mag(sub(b.pos, ship.pos)))[0];
   }
 
   /** Rough fuel for a trip of `d` units: burn time to get up to speed and to stop, plus cruising. */
   tripCost(d, toPos = null) {
     const burn = this.universe.fuel.burn;
-    let cost = burn * (11 + d / 4000);
+    let cost = burn * (14 + d / 3200);
     if (toPos) { // crossing a rock belt means slow, twisty flying and the odd knock
       const from = this.ship.pos, hit = new Set();
       for (let k = 0; k <= 16; k++) {
@@ -101,26 +103,35 @@ export class Autopilot {
   pickTarget() {
     const u = this.universe, ship = this.ship;
     const f = this.fuelState;
-    const reach = (p) => !f || this.tripCost(mag(sub(p.pos, ship.pos)), p.pos) * 1.25 + 8 <= f.level;
+    const reach = (p) => !f || this.tripCost(mag(sub(p.pos, ship.pos)), p.pos) * 1.5 + 8 <= f.level;
     const now = u.now;
     const allowed = (p) => (this.skip.get(p) ?? 0) <= now;
     // moons of heavy planets sit in a well the engine cannot climb out of: leave those to the pilot
     const reachableMoon = (p) => !p.isMoon || p.parent.radius <= 1100;
-    let pool = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p));
+    // gas giants are surveyed by hovering in their top air, which only works where gravity is gentle enough
+    const surveyable = (p) => {
+      if (!p.gas) return true;
+      const d = p.radius + p.atmo.top * 0.85;
+      return (GRAVITATION * SPACECRAFT_MASS * p.mass) / (d * d) < 800;
+    };
+    let pool = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p) && surveyable(p));
     if (f) pool = pool.filter(reach); // never plan a trip the tank cannot cover
     if (f && !pool.length && u.planets.some((p) => !this.charted(p))) {
       // uncharted worlds exist but are out of range: refuel at the nearest world first
       this.refuelling = true;
       this.uncharted = false;
-      return this.nearest(u.planets.filter((p) => !p.isMoon));
+      return this.nearest(u.planets.filter((p) => !p.isMoon && !p.gas));
     }
     this.uncharted = pool.length > 0;
-    if (!pool.length) pool = u.planets.filter((p) => !p.isMoon && p !== this.lastTarget);
+    // everything is charted: wander between solid planets (gas giants are costly to leave again)
+    if (!pool.length) pool = u.planets.filter((p) => !p.isMoon && !p.gas && p !== this.lastTarget);
+    if (!pool.length) pool = u.planets.filter((p) => !p.gas && reachableMoon(p));
     if (!pool.length) pool = u.planets;
     const weights = pool.map((p) => {
       const d = mag(sub(p.pos, ship.pos));
       let w = (p.isMoon ? 0.6 : 1) / (1 + (d / 25_000) ** 2);
       if (f && f.burn * (11 + d / 5000) + 15 > f.level) w *= 0.05;
+      if (this.pathBlockedByStar(p)) w *= 0.02; // a route straight through a star is a bad idea; prefer the near side
       return w;
     });
     let x = (this.rng ?? Math.random)() * weights.reduce((a, b) => a + b, 0);
@@ -141,12 +152,13 @@ export class Autopilot {
     for (const w of [...wells, ...this.universe.planets]) {
       if (w === target) continue;
       const isWell = wells.includes(w);
-      const R = w.isBlackHole ? w.radius * 10 : isWell ? w.radius * 1.9 : w.radius * 2.2 + 350;
+      const R = w.isBlackHole ? w.radius * 10 : isWell ? w.radius * 3.2 : Math.max(w.radius * 2.2 + 350, this.moonZone(w));
       const toW = sub(w.pos, ship.pos);
-      if (isWell && mag(toW) < R) { // already inside a star's corona or a black hole's danger zone: get out
+      if (isWell && mag(toW) < (w.isBlackHole ? R : w.radius * 1.9)) { // already inside a star's corona or a black hole's danger zone: get out
         escape = add(escape, mul(toW, -1 / (mag(toW) || 1)));
         continue;
       }
+      if (isWell) continue; // stars and black holes are routed around instead (see routeAroundWells)
       const t = dot(toW, vector) / len2;
       if (t <= 0 || t >= 1 || t >= bestT) continue;
       const off = sub(add(ship.pos, mul(vector, t)), w.pos);
@@ -159,6 +171,7 @@ export class Autopilot {
       const dir = m > 1 ? mul(best.off, 1 / m) : { x: -vector.y / Math.sqrt(len2), y: vector.x / Math.sqrt(len2) };
       push = add(push, mul(dir, clamp(1.4 - m / best.R, 0.2, 1)));
     }
+    this.avoidActive = mag(push) > 0.05;
     return mag(push) > 1 ? mul(push, 1 / mag(push)) : push;
   }
 
@@ -205,6 +218,51 @@ export class Autopilot {
     return worst;
   }
 
+  /**
+   * If the straight line to the target crosses a star's or black hole's danger zone, return a vector
+   * to a waypoint on the zone's edge instead (go around, not through). Null when the way is clear.
+   */
+  routeAroundWells(ship, vector, target) {
+    const len2 = vector.x * vector.x + vector.y * vector.y;
+    if (len2 < 1) return null;
+    let best = null, bestT = Infinity;
+    for (const w of this.universe.wells) {
+      const R = w.isBlackHole ? w.radius * 10 : w.radius * 3.2;
+      const toW = sub(w.pos, ship.pos);
+      if (mag(toW) < R * 0.9) continue; // already inside: the escape logic handles it
+      if (target && mag(sub(target.pos, w.pos)) < R * 1.05) continue; // the target itself lives in that zone
+      const t = dot(toW, vector) / len2;
+      if (t <= 0 || t >= 1 || t >= bestT) continue;
+      const off = sub(add(ship.pos, mul(vector, t)), w.pos), m = mag(off);
+      if (m >= R) continue;
+      const dir = m > 1 ? mul(off, 1 / m) : { x: -vector.y / Math.sqrt(len2), y: vector.x / Math.sqrt(len2) };
+      best = sub(add(w.pos, mul(dir, R * 1.2)), ship.pos); bestT = t;
+    }
+    return best;
+  }
+
+  /** Does the straight line from the ship to `p` pass through a star's or black hole's danger zone? */
+  pathBlockedByStar(p) {
+    const from = this.ship.pos, v = sub(p.pos, from), len2 = v.x * v.x + v.y * v.y;
+    if (len2 < 1) return false;
+    for (const w of this.universe.wells) {
+      const R = w.isBlackHole ? w.radius * 10 : w.radius * 3.2;
+      const t = dot(sub(w.pos, from), v) / len2;
+      if (t <= 0 || t >= 1) continue;
+      if (mag(sub(add(from, mul(v, t)), w.pos)) < R) return true;
+    }
+    return false;
+  }
+
+  /** Radius of the swarm of moons around a planet (0 if it has none). */
+  moonZone(p) {
+    if (p.moonZoneR === undefined) {
+      const orbits = this.universe.planets.filter((m) => m.parent === p && !p.isAnchor).map((m) => m.orbitRadius);
+      p.moonZoneR = orbits.length ? Math.max(...orbits) * 1.15 + 100 : 0;
+    }
+    return p.moonZoneR;
+  }
+
   /** Belts are rock walls at speed: slow down before the path enters one, and stay slow inside. */
   beltSpeedCap(ship, vector) {
     const belts = this.universe.belts;
@@ -217,6 +275,21 @@ export class Autopilot {
       }
     }
     return Infinity;
+  }
+
+  // Done surveying a gas giant: log it as visited and burn straight out of the atmosphere.
+  arriveAtGas(ship, target) {
+    this.dwell = 0;
+    this.visited.add(target);
+    this.lastTarget = target;
+    this.target = null;
+    this.refuelling = false;
+    this.lock = 0;
+    this.strategy = 'LAUNCHING';
+    this.setAngle(angleOf(sub(ship.pos, target.pos)), 6);
+    ship.thrust = fromAngle(ship.angle, 1);
+    this.nextStrategyTime = this.universe.now + 15;
+    if (!target.explored && !this.ai) this.universe.survey(target);
   }
 
   /**
@@ -240,7 +313,21 @@ export class Autopilot {
     const brake = Math.max(250, MAIN_ENGINE_ACCEL - 0.6 * surfaceG);
     // Where gravity out-pulls 80% of the engine you can no longer brake, so slow down *before*
     // that point and let a full retro burn soften the rest of the fall.
-    const hover = Math.max(0, Math.sqrt((GRAVITATION * SPACECRAFT_MASS * target.mass) / (0.8 * MAIN_ENGINE_ACCEL)) - target.radius);
+    const hover = target.gas ? 0 : Math.max(0, Math.sqrt((GRAVITATION * SPACECRAFT_MASS * target.mass) / (0.8 * MAIN_ENGINE_ACCEL)) - target.radius);
+    if (target.gas && altitude < this.landingAltitude) {
+      // Gas giant: there is nothing to land on. Hover in the top of the air for a few seconds (that
+      // counts as a survey), then climb back out.
+      this.strategy = 'SURVEYING';
+      const away = angleOf(sub(ship.pos, target.pos)), d = mag(targetVector) + 0;
+      const g = (GRAVITATION * SPACECRAFT_MASS * target.mass) / (d * d);
+      const closing = dot(relativeV, mul(targetVector, 1 / d));
+      this.setAngle(away, LANDING_TURN_RATE);
+      const aligned = Math.abs(wrap(away - ship.angle)) < 0.5;
+      ship.thrust = aligned ? fromAngle(ship.angle, clamp(g / MAIN_ENGINE_ACCEL + closing / 300, 0, 1)) : vec();
+      this.dwell = (this.dwell ?? 0) + this.universe.dt;
+      if (this.dwell > 2.5) this.arriveAtGas(ship, target);
+      return;
+    }
     if (altitude < Math.max(this.landingAltitude, hover)) {
       // Final descent: cancel the relative velocity (sideways drift included) until it is well under
       // the limit, then face away from the ground and let gravity finish the job.
@@ -253,10 +340,25 @@ export class Autopilot {
       ship.thrust = braking && aligned ? fromAngle(ship.angle, clamp((speed - 0.2 * safe) / 150, 0.1, 1)) : vec();
       return;
     }
-    const dir = mul(targetVector, 1 / mag(targetVector));
-    const approach = Math.min(0.72 * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, targetVector),
-      Math.sqrt(brake * Math.max(0, altitude - Math.max(this.landingAltitude, hover))) + 0.2 * safe);
-    const desired = add(mul(dir, approach), mul(this.avoidance(ship, targetVector, target), 0.6 * approach));
+    const route = this.routeAroundWells(ship, targetVector, target);
+    const dir = mul(route ?? targetVector, 1 / mag(route ?? targetVector));
+    const stopAlt = Math.max(this.landingAltitude, hover);
+    let approach = Math.sqrt(brake * Math.max(0, altitude - stopAlt)) + 0.2 * safe;
+    if (target.atmo && !target.gas) {
+      // Aerobraking: thick air does part of the braking for free, so the autopilot is allowed to arrive
+      // faster than a pure engine burn would permit, as long as the heating stays inside the limit.
+      const rhoMid = densityAt(target, Math.min(altitude, target.atmo.top) * 0.5);
+      const aero = DRAG_COEFF * rhoMid * approach * approach * 0.6;
+      approach = Math.sqrt((brake + aero) * Math.max(0, altitude - stopAlt)) + 0.2 * safe;
+      approach = Math.min(approach, 0.9 * heatSafeSpeed(densityAt(target, altitude - approach * 1.0)));
+    }
+    // moons sweep through at hundreds of units a second: be slow while crossing a planet's moon swarm
+    const zone = this.moonZone(target);
+    if (zone) approach = Math.min(approach, Math.sqrt(2 * 600 * Math.max(0, mag(targetVector) - zone)) + 300);
+    approach = Math.min(0.72 * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, targetVector), approach);
+    const push = this.avoidance(ship, targetVector, target);
+    if (this.avoidActive || route) approach = Math.min(approach, route ? 2200 : 1800); // stay agile enough to steer around the obstacle
+    const desired = add(mul(dir, approach), mul(push, 0.9 * approach));
     const dv = sub(add(desired, mul(this.rockPush(ship, dir), 350)), relativeV);
     const dvMag = mag(dv);
     const along = dot(relativeV, dir);
@@ -326,7 +428,10 @@ export class Autopilot {
     if (this.assist) { // inside a star's corona or a black hole's danger zone: leave first, think later
       for (const w of this.universe.wells) {
         const away = sub(ship.pos, w.pos), d = mag(away);
-        if (d >= (w.isBlackHole ? w.radius * 8 : w.radius * 1.7)) continue;
+        // start turning away early enough to actually stop: braking distance grows with the square of the closing speed
+        const closing = Math.max(0, -dot(sub(ship.velocity, w.velocity), away) / (d || 1));
+        const danger = (w.isBlackHole ? w.radius * 8 : w.radius * 1.5) + (closing * closing) / (2 * 650) + 300;
+        if (d >= danger) continue;
         this.strategy = 'ESCAPING';
         const dv = sub(mul(away, 900 / (d || 1)), sub(ship.velocity, w.velocity));
         this.setAngle(angleOf(dv), 6);
@@ -362,13 +467,14 @@ export class Autopilot {
       this.target = this.pickTarget(sim);
       this.bestDist = Infinity;
       this.progressAt = sim.now;
+      this.dwell = 0;
       this.brakingDistance = 0;
       this.lock = 0;
     }
     // fuel check while in flight: if the tank is getting low, divert to the nearest world
     const f = this.fuelState;
-    if (f && !this.refuelling && this.tripCost(mag(sub(this.target.pos, ship.pos)), this.target.pos) * 1.1 + 5 > f.level) {
-      this.target = this.nearest(this.universe.planets.filter((p) => !p.isMoon));
+    if (f && !this.refuelling && this.tripCost(mag(sub(this.target.pos, ship.pos)), this.target.pos) * 1.2 + 8 > f.level) {
+      this.target = this.nearest(this.universe.planets.filter((p) => !p.isMoon && !p.gas));
       this.refuelling = true;
       this.lock = 0;
       this.brakingDistance = 0;
@@ -407,7 +513,7 @@ export class Autopilot {
 
     const targetVector = sub(target.pos, ship.pos);
     const altitude = mag(targetVector) - target.radius;
-    this.landingAltitude = Math.min(target.radius, 100);
+    this.landingAltitude = target.gas ? target.atmo.top * 0.85 : Math.min(target.radius, 100);
 
     const relativeV = sub(ship.velocity, target.velocity);
     const projection = dot(relativeV, mul(targetVector, 1 / mag(targetVector)));
