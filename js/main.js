@@ -174,6 +174,9 @@ universe.onImpact = ({ planet, speed, safe, damage }) =>
 
 const canvas = document.getElementById('space');
 const ctx = canvas.getContext('2d');
+const pip = document.getElementById('pip');
+const pipCtx = pip.getContext('2d');
+const PIP_SIZE = 160, PIP_ZOOM = 3.5;
 const hudTop = document.getElementById('catalog');
 const hudShip = document.getElementById('ship');
 const hudAuto = document.getElementById('autotext');
@@ -319,6 +322,37 @@ function updateHud() {
 }
 
 let hudClock = 1000, lastMs = 0;
+// Ship cam: a fixed close-up of the ship, with its velocity (relative to the nearest world) and thrust.
+function drawShipCam() {
+  const u = universe, ship = u.ship;
+  const show = state.options.pip && cam.zoom < 0.4 && !ship.consumed;
+  pip.hidden = !show;
+  if (!show) return;
+  const d = Math.min(window.devicePixelRatio || 1, 2);
+  if (pip.width !== PIP_SIZE * d) { pip.width = pip.height = PIP_SIZE * d; }
+  renderUniverse(pipCtx, u, { x: ship.pos.x, y: ship.pos.y, zoom: PIP_ZOOM }, PIP_SIZE, PIP_SIZE, d);
+  pipCtx.setTransform(d, 0, 0, d, 0, 0);
+  const c = PIP_SIZE / 2, ref = u.closestPlanet();
+  const rel = sub(ship.velocity, ref.velocity), speed = mag(rel);
+  const arrow = (vx, vy, len, color, width) => {
+    pipCtx.strokeStyle = color; pipCtx.fillStyle = color; pipCtx.lineWidth = width;
+    const a = Math.atan2(vy, vx), x = c + Math.cos(a) * len, y = c + Math.sin(a) * len;
+    pipCtx.beginPath(); pipCtx.moveTo(c, c); pipCtx.lineTo(x, y); pipCtx.stroke();
+    pipCtx.beginPath();
+    pipCtx.moveTo(x, y); pipCtx.lineTo(x - Math.cos(a - 0.45) * 7, y - Math.sin(a - 0.45) * 7);
+    pipCtx.lineTo(x - Math.cos(a + 0.45) * 7, y - Math.sin(a + 0.45) * 7); pipCtx.fill();
+  };
+  if (speed > 5) arrow(rel.x, rel.y, Math.min(c - 12, 14 + Math.log10(1 + speed) * 16), '#4ade80', 1.5); // velocity
+  const th = mag(ship.thrust);
+  if (th > 0) arrow(-Math.cos(ship.angle), -Math.sin(ship.angle), 10 + th * 30, '#ff8800', 2); // push (opposite the flame)
+  pipCtx.fillStyle = '#b7b7ff';
+  pipCtx.font = '9px ui-monospace, Menlo, monospace';
+  pipCtx.textAlign = 'center';
+  pipCtx.fillText(`${Math.round(speed)} rel ${ref.name.split(' ').pop()}`, c, PIP_SIZE - 9);
+  pipCtx.fillStyle = '#4ade80'; pipCtx.textAlign = 'left'; pipCtx.fillText('vel', 14, 14);
+  pipCtx.fillStyle = '#ff8800'; pipCtx.fillText('thrust', 14, 25);
+}
+
 function frame(ms) {
   const u = universe;
   u.step(ms / 1000);
@@ -331,6 +365,7 @@ function frame(ms) {
 
   renderUniverse(ctx, u, cam, w, h, dpr);
   drawStick(ctx, stick, dpr);
+  drawShipCam();
   autopilot.manual = stick.active;
   hudClock += ms - lastMs; lastMs = ms;
   if (hudClock > 100) { hudClock = 0; updateHud(); checkContacts(); } // the HUD does not need 60 fps

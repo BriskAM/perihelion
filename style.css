@@ -88,3 +88,10 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 .link { color: var(--autopilot); font-size: 11px; }
 .act.picked { background: var(--autopilot); }
 .toast.bad { border-color: #ff6a55; color: #ffb4a8; }
+
+/* ship cam: a fixed close-up that appears when the main view is zoomed out */
+#pip {
+  position: fixed; right: 10px; top: 50%; transform: translateY(-50%); width: 160px; height: 160px;
+  border: 1px solid var(--console); border-radius: 50%; background: var(--void); pointer-events: none; opacity: 0.95;
+}
+#pip[hidden] { display: none; }

@@ -134,6 +134,7 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('survival', 'Survival', 'Fuel burns when you thrust; the star corona burns it faster. Refuel by landing.');
     toggleRow('missions', 'Missions', 'Three jobs per system, paid in credits.');
     toggleRow('assist', 'Assisted autopilot', 'Takes time to lock on, turns at a limited rate, and hands control back when you grab the stick. Off = classic instant autopilot.');
+    toggleRow('pip', 'Ship cam', 'A small fixed close-up of your ship (with velocity and thrust arrows) when the main view is zoomed out.');
     toggleRow('strict', 'Strict landing', 'You must slow down to land: too fast and you bounce and take damage, far too fast and the ship is destroyed. The limit is higher on heavy planets. Off = land at any speed.');
     toggleRow('warp', 'Warped gravity grid', 'The background grid dips into stars, black holes and big planets. Off = flat grid.');
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');

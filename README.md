@@ -48,6 +48,8 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   you can sit in a stable orbit around a planet.
 - The autopilot aerobrakes (lets thick air do part of the braking within the heating limit), hovers
   over gas giants to survey them, routes around stars and black holes, and avoids moon swarms.
+- Ship cam: when the main view is zoomed out, a small round window shows a fixed close-up of your ship
+  with its velocity (green) and thrust (orange) arrows. Toggle it in the menu.
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment
