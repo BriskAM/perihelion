@@ -137,6 +137,7 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('pip', 'Ship cam', 'A small fixed close-up of your ship (with velocity and thrust arrows) when the main view is zoomed out.');
     toggleRow('strict', 'Strict landing', 'You must slow down to land: too fast and you bounce and take damage, far too fast and the ship is destroyed. The limit is higher on heavy planets. Off = land at any speed.');
     toggleRow('warp', 'Warped gravity grid', 'The background grid dips into stars, black holes and big planets. Off = flat grid.');
+    toggleRow('orbit', 'Orbit-first landings', 'The autopilot captures into a low orbit, then spirals down (using the air where there is some) instead of braking in a straight line. Only for planets with room for a stable orbit.');
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');

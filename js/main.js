@@ -37,6 +37,7 @@ const missions = makeMissions(universe);
 
 function applyShip() {
   autopilot.assist = state.options.assist;
+  autopilot.orbitFirst = state.options.orbit;
   universe.style.fancy = state.options.fancy;
   universe.style.warp = state.options.warp;
   universe.style.strict = state.options.strict;

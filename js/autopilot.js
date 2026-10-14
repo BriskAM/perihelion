@@ -1,5 +1,5 @@
 import {
-  vec, sub, mag, dot, angleOf, fromAngle, add, mul, expSmooth, clamp, PI2,
+  vec, sub, mag, dot, dist, angleOf, fromAngle, add, mul, expSmooth, clamp, PI2,
 } from './maths.js';
 import {
   MAIN_ENGINE_ACCEL, CRAFT_SPEED_LIMIT, GRAVITATION, SPACECRAFT_MASS, landingSpeedLimit,
@@ -14,6 +14,7 @@ const LANDING_TURN_RATE = 8;
 const OVERRIDE_HOLD = 1.2; // seconds after you let go of the stick before it re-locks
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const unit = (v) => mul(v, 1 / (mag(v) || 1));
 
 /**
  * Autopilot. In "classic" mode (assist = false) it is the original behaviour: it snaps its
@@ -28,6 +29,7 @@ export class Autopilot {
     this.rng = rng;
     this.enabled = false;
     this.assist = true;
+    this.orbitFirst = true; // land via a captured orbit rather than a straight braking burn
     this.manual = false; // set by the input layer while the stick is held
     this.target = null;
     this.lastTarget = null;
@@ -108,13 +110,15 @@ export class Autopilot {
     const allowed = (p) => (this.skip.get(p) ?? 0) <= now;
     // moons of heavy planets sit in a well the engine cannot climb out of: leave those to the pilot
     const reachableMoon = (p) => !p.isMoon || p.parent.radius <= 1100;
+    // a world sitting inside a giant's thick air (a binary partner, say) cannot be approached without burning up
+    const clearOfAir = (p) => !u.planets.some((q) => q !== p && q !== p.parent && q.atmo && q.gas && dist(q.pos, p.pos) < (q.radius + q.atmo.top) * 1.8 + 600);
     // gas giants are surveyed by hovering in their top air, which only works where gravity is gentle enough
     const surveyable = (p) => {
       if (!p.gas) return true;
       const d = p.radius + p.atmo.top * 0.85;
       return (GRAVITATION * SPACECRAFT_MASS * p.mass) / (d * d) < 800;
     };
-    let pool = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p) && surveyable(p));
+    let pool = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p) && surveyable(p) && clearOfAir(p));
     if (f) pool = pool.filter(reach); // never plan a trip the tank cannot cover
     if (f && !pool.length && u.planets.some((p) => !this.charted(p))) {
       // uncharted worlds exist but are out of range: refuel at the nearest world first
@@ -152,7 +156,7 @@ export class Autopilot {
     for (const w of [...wells, ...this.universe.planets]) {
       if (w === target) continue;
       const isWell = wells.includes(w);
-      const R = w.isBlackHole ? w.radius * 10 : isWell ? w.radius * 3.2 : Math.max(w.radius * 2.2 + 350, this.moonZone(w));
+      const R = w.isBlackHole ? w.radius * 10 : isWell ? w.radius * 3.2 : Math.max(w.radius * 2.2 + 350, this.moonZone(w), w.atmo ? (w.radius + w.atmo.top) * 1.6 + 200 : 0);
       const toW = sub(w.pos, ship.pos);
       if (isWell && mag(toW) < (w.isBlackHole ? R : w.radius * 1.9)) { // already inside a star's corona or a black hole's danger zone: get out
         escape = add(escape, mul(toW, -1 / (mag(toW) || 1)));
@@ -314,6 +318,8 @@ export class Autopilot {
     // Where gravity out-pulls 80% of the engine you can no longer brake, so slow down *before*
     // that point and let a full retro burn soften the rest of the fall.
     const hover = target.gas ? 0 : Math.max(0, Math.sqrt((GRAVITATION * SPACECRAFT_MASS * target.mass) / (0.8 * MAIN_ENGINE_ACCEL)) - target.radius);
+    const plan = this.orbitPlan(target);
+    if (plan && this.guideOrbit(ship, target, targetVector, altitude, relativeV, plan, { safe, brake, hover })) return;
     if (target.gas && altitude < this.landingAltitude) {
       // Gas giant: there is nothing to land on. Hover in the top of the air for a few seconds (that
       // counts as a survey), then climb back out.
@@ -340,8 +346,6 @@ export class Autopilot {
       ship.thrust = braking && aligned ? fromAngle(ship.angle, clamp((speed - 0.2 * safe) / 150, 0.1, 1)) : vec();
       return;
     }
-    const route = this.routeAroundWells(ship, targetVector, target);
-    const dir = mul(route ?? targetVector, 1 / mag(route ?? targetVector));
     const stopAlt = Math.max(this.landingAltitude, hover);
     let approach = Math.sqrt(brake * Math.max(0, altitude - stopAlt)) + 0.2 * safe;
     if (target.atmo && !target.gas) {
@@ -352,11 +356,23 @@ export class Autopilot {
       approach = Math.sqrt((brake + aero) * Math.max(0, altitude - stopAlt)) + 0.2 * safe;
       approach = Math.min(approach, 0.9 * heatSafeSpeed(densityAt(target, altitude - approach * 1.0)));
     }
+    this.cruise(ship, target, targetVector, targetVector, approach, relativeV);
+  }
+
+  /**
+   * One step of cruising toward `aim` (a vector from the ship) at up to `approach` speed relative to the
+   * target: caps for rock belts and moon swarms, a detour around stars, sideways nudges around planets
+   * and rocks, then a thrust toward the wanted relative velocity. `targetVector` is the vector to the
+   * target itself (for the swarm and belt caps).
+   */
+  cruise(ship, target, aim, targetVector, approach, relativeV) {
+    const route = this.routeAroundWells(ship, aim, target);
+    const dir = mul(route ?? aim, 1 / mag(route ?? aim));
     // moons sweep through at hundreds of units a second: be slow while crossing a planet's moon swarm
     const zone = this.moonZone(target);
     if (zone) approach = Math.min(approach, Math.sqrt(2 * 600 * Math.max(0, mag(targetVector) - zone)) + 300);
-    approach = Math.min(0.72 * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, targetVector), approach);
-    const push = this.avoidance(ship, targetVector, target);
+    approach = Math.min(0.72 * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, aim), approach);
+    const push = this.avoidance(ship, aim, target);
     if (this.avoidActive || route) approach = Math.min(approach, route ? 2200 : 1800); // stay agile enough to steer around the obstacle
     const desired = add(mul(dir, approach), mul(push, 0.9 * approach));
     const dv = sub(add(desired, mul(this.rockPush(ship, dir), 350)), relativeV);
@@ -369,12 +385,129 @@ export class Autopilot {
     ship.thrust = fromAngle(ship.angle, off < 0.5 ? clamp(dvMag / 300, 0.15, 1) : 0);
   }
 
+  /**
+   * Sidestep for fast-moving moons of the target: predict the closest approach (both on straight
+   * lines for the next few seconds) and, if it would be a hit, return a velocity nudge away from it.
+   */
+  moonDodge(ship, target) {
+    let nx = 0, ny = 0;
+    for (const m of this.universe.planets) {
+      if (m.parent !== target) continue;
+      const p = sub(m.pos, ship.pos), v = sub(m.velocity, ship.velocity), v2 = v.x * v.x + v.y * v.y;
+      if (v2 < 1) continue;
+      const tca = clamp(-(p.x * v.x + p.y * v.y) / v2, 0, 6);
+      const miss = sub(add(p, mul(v, tca)), vec());
+      const dist = mag(miss), reach = m.radius + 90 + 0.4 * Math.sqrt(v2) * 0.1;
+      if (dist >= reach) continue;
+      const away = dist > 1 ? mul(miss, -1 / dist) : unit(vec(-v.y, v.x));
+      const w = (1 - dist / reach) * (1 - tca / 8);
+      nx += away.x * w; ny += away.y * w;
+    }
+    return vec(nx * 700, ny * 700);
+  }
+
+  /** Burn toward the wanted velocity `vDes` (relative to the target), but only once pointed that way. */
+  burnToward(ship, vDes, relativeV, gain = 250, turn = TURN_RATE) {
+    const dv = sub(vDes, relativeV), m = mag(dv);
+    if (m < 25) { ship.thrust = vec(); return m; }
+    this.setAngle(angleOf(dv), turn);
+    ship.thrust = fromAngle(ship.angle, Math.abs(wrap(angleOf(dv) - ship.angle)) < 0.5 ? clamp(m / gain, 0.1, 1) : 0);
+    return m;
+  }
+
+  /**
+   * Orbit-first arrival. Instead of killing all speed in a straight suicide burn, aim to pass the planet
+   * at a chosen low altitude, circularise there with one burn at the lowest point (CAPTURE), hold
+   * ORBITING briefly, then spiral down (DESCENT): the sideways speed is shaved off gradually, with
+   * thick air doing the work for free where there is some. Below the hover height (or the landing
+   * height) the old final-landing logic takes over. Returns null when this target is not a good fit
+   * (moons, gas giants, worlds whose gravity zone is too small for a stable orbit).
+   */
+  orbitPlan(target) {
+    if (!this.assist || !this.orbitFirst || target.gas || target.isMoon || !target.hill) return null;
+    const top = target.atmo ? target.atmo.top : 0;
+    const rOrb = target.radius + Math.max(top + 60, 0.45 * target.radius, 120);
+    if (rOrb > 0.3 * target.hill) return null;
+    // big moons that cross the capture path make orbit-first risky (a coplanar orbit meets them head-on)
+    let risk = 0;
+    for (const m of this.universe.planets) if (m.parent === target) risk += (m.radius + 30) / (Math.PI * m.orbitRadius);
+    if (risk > 0.015) return null;
+    const rCap = Math.min(0.7 * target.hill, Math.max(4 * rOrb, 6 * target.radius));
+    if (rCap < rOrb * 1.8) return null;
+    return { rOrb, rCap, mu: GRAVITATION * SPACECRAFT_MASS * target.mass };
+  }
+
+  /** Returns true when it handled this frame; false to let the direct-landing code run. */
+  guideOrbit(ship, target, targetVector, altitude, relativeV, plan, { safe, brake, hover }) {
+    const now = this.universe.now;
+    const r = mag(targetVector), rhat = mul(targetVector, -1 / (r || 1)), that = vec(-rhat.y, rhat.x);
+    const vr = dot(relativeV, rhat), vt = dot(relativeV, that), vc = Math.sqrt(plan.mu / r);
+    const sense = vt >= 0 ? 1 : -1; // keep whichever way round we are already going
+    this.orbitPhase ??= 'far';
+    this.progressAt = now; // slow, deliberate flying is not "stuck"
+    if (this.orbitPhase !== 'far' && r > plan.rCap * 1.6) this.orbitPhase = 'far'; // flung back out: start again
+    if (this.orbitPhase === 'far' && r < plan.rCap) { this.orbitPhase = 'capture'; this.orbitSince = now; }
+
+    if (this.orbitPhase === 'far') {
+      // aim to one side of the planet, so gravity bends the path into a low pass instead of a dive
+      const vArr = 1.05 * Math.sqrt((2 * plan.mu) / plan.rCap) + 60;
+      const eps = (vArr * vArr) / 2 - plan.mu / plan.rCap;
+      const vPeri = Math.sqrt(2 * (eps + plan.mu / plan.rOrb));
+      const b = plan.rCap * clamp((plan.rOrb * vPeri) / (plan.rCap * vArr), 0, 0.85);
+      const u = mul(targetVector, 1 / r), aim = add(targetVector, mul(vec(-u.y, u.x), b));
+      const approach = Math.sqrt(2 * 700 * Math.max(0, r - plan.rCap)) + vArr;
+      this.cruise(ship, target, aim, targetVector, approach, relativeV);
+      return true;
+    }
+
+    const stopAlt = Math.max(this.landingAltitude, hover);
+    const alt = r - target.radius;
+    if (this.orbitPhase === 'capture' || this.orbitPhase === 'orbit') {
+      const circular = Math.abs(r - plan.rOrb) < 0.18 * plan.rOrb && Math.abs(vr) < 0.15 * vc && Math.abs(vt - sense * vc) < 0.18 * vc;
+      if (this.orbitPhase === 'capture') {
+        if (circular) { this.orbitPhase = 'orbit'; this.orbitSince = now; }
+        else if (now - this.orbitSince > 90) { this.orbitPhase = 'descent'; }
+      } else if (!circular) this.orbitPhase = 'capture';
+      else if (now - this.orbitSince > 1.5) this.orbitPhase = 'descent';
+    }
+
+    if (this.orbitPhase === 'capture') {
+      this.strategy = 'CAPTURE';
+      this.debug = `r ${(r / plan.rOrb).toFixed(2)} of orbit`;
+      const vDes = add(add(mul(that, sense * vc), mul(rhat, clamp((plan.rOrb - r) * 0.8, -450, 450))), this.moonDodge(ship, target));
+      this.burnToward(ship, vDes, relativeV);
+      return true;
+    }
+    if (this.orbitPhase === 'orbit') {
+      this.strategy = 'ORBITING';
+      this.debug = `v ${Math.round(vc)}`;
+      ship.thrust = vec();
+      return true;
+    }
+
+    // descent
+    if (alt <= stopAlt) return false; // close enough: the final-landing code takes it from here
+    this.strategy = 'DESCENT';
+    this.debug = `alt ${Math.round(alt)}`;
+    const s = clamp((alt - stopAlt) / Math.max(1, plan.rOrb - target.radius - stopAlt), 0, 1);
+    const vDes = add(add(mul(that, sense * vc * 0.9 * s), mul(rhat, -clamp(0.4 * Math.sqrt(2 * brake * (alt - stopAlt)), 30, 260))), this.moonDodge(ship, target));
+    const rho = densityAt(target, alt);
+    if (rho > 0.02 && mag(relativeV) >= mag(vDes) * 0.9 && ship.heat < 0.5) { // let the air do the braking
+      ship.thrust = vec();
+      this.strategy = 'AEROBRAKE';
+      return true;
+    }
+    this.burnToward(ship, vDes, relativeV, 200, LANDING_TURN_RATE);
+    return true;
+  }
+
   update(sim, dt) {
     if (!this.enabled) return;
     const ship = this.ship;
     if (ship.consumed) { this.target = null; return; }
 
     if (this.manual) { // you have the stick: hands off
+      this.orbitPhase = null;
       this.strategy = 'MANUAL';
       this.debug = 'override';
       this.lock = 0;
@@ -385,6 +518,13 @@ export class Autopilot {
     if (this.assist && sim.now < this.hold) {
       this.strategy = 'RELEASED';
       this.debug = '';
+      return;
+    }
+    // reentry emergency: heating well above the comfort level means slow down and climb, whatever the plan said
+    if (this.assist && ship.heatRate > 0.55 && ship.atmoPlanet && !ship.landing) {
+      const p = ship.atmoPlanet, away = unit(sub(ship.pos, p.pos));
+      this.strategy = 'HEAT!';
+      this.burnToward(ship, mul(away, 400), sub(ship.velocity, p.velocity), 200, 6);
       return;
     }
     // smooth turning toward the heading the current strategy asked for
@@ -405,6 +545,7 @@ export class Autopilot {
         // just arrived: see the sights
         this.strategy = 'LANDED';
         this.debug = '';
+        this.orbitPhase = null;
         this.lastTarget = this.target;
         this.visited.add(this.target);
         this.target = null;
@@ -468,6 +609,7 @@ export class Autopilot {
       this.bestDist = Infinity;
       this.progressAt = sim.now;
       this.dwell = 0;
+      this.orbitPhase = null;
       this.brakingDistance = 0;
       this.lock = 0;
     }

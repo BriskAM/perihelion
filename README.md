@@ -50,6 +50,11 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   over gas giants to survey them, routes around stars and black holes, and avoids moon swarms.
 - Ship cam: when the main view is zoomed out, a small round window shows a fixed close-up of your ship
   with its velocity (green) and thrust (orange) arrows. Toggle it in the menu.
+- Orbit-first landings (Options > Orbit-first landings): for planets with room for a stable orbit and no
+  big moons in the way, the autopilot aims to pass low, circularises with one burn (CAPTURE), holds
+  ORBITING briefly, then spirals down (DESCENT), coasting through any atmosphere so the air does the
+  braking (AEROBRAKE). In my 15-system test it used about 18% less fuel per discovery and made about a
+  third as many hard landings as the straight braking burn.
 - AI ships with their own hulls and callsigns that fly between planets and land.
 - Assisted autopilot: it takes a moment to lock on, turns at a limited rate, coasts to save fuel,
   steers around the star, and hands control back when you grab the stick (it re-locks a moment
