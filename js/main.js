@@ -1,5 +1,5 @@
 import {
-  clamp, dailySeed, mag, sub, angleOf, fromAngle, vec, dist,
+  clamp, dailySeed, mag, sub, mul, angleOf, fromAngle, vec, dist,
 } from './maths.js';
 import { Universe, STAR_CLASSES, landingSpeedLimit, SOL_SEED, Spark } from './universe.js';
 import { Autopilot } from './autopilot.js';
@@ -23,6 +23,7 @@ import { captainsLine } from './captainlog.js';
 import { deployOutpost, rebuildOutposts, outpostIncome, spawnWing, WING_COST, dailyTick, dailyActive, dailyState, dailyShareText } from './outposts.js';
 import { Maneuver } from './maneuver.js';
 import { Replay } from './replay.js';
+import { Wonders } from './wonders.js';
 import { createPip } from './pip.js';
 import { createHud, cap } from './hud.js';
 
@@ -225,7 +226,7 @@ function buildSystem(newSeed, newSystem) {
   if (soundStarted) sound.setPad(universe.star.cls, !!universe.star.isBlackHole);
   cam.snap(universe, w, h); pipCam.snap(universe, 340, 340);
   window.__universe = universe;
-  replay.clear(); maneuver.cancel();
+  replay.clear(); maneuver.cancel(); usedWormholeExit = false;
   setTheme();
   rebuildOutposts(G);
   spawnWing(G);
@@ -239,6 +240,9 @@ function buildSystem(newSeed, newSystem) {
     damageHull(b * 30 * dt, 'beam');
     if (performance.now() - (beamToast ?? 0) > 6000) { beamToast = performance.now(); ui.toast('!! PULSAR BEAM !!', 'bad'); sound.alarm(); say('beam'); }
   };
+  universe.wonders = new Wonders(universe, params.get('wonder')); // (?wonder=fortress etc. forces one, for testing)
+  universe.wonders.onEvent = onWonder;
+  if (universe.wonders.list.length) setTimeout(() => ui.toast(`SOMETHING STRANGE IN THIS SYSTEM: ${universe.wonders.list.map((k) => ({ dyson: 'a Dyson swarm', fortress: 'a battle station', wormhole: 'wormholes', whales: 'star whales' })[k]).join(', ')}`, 'good'), 7000);
   if (universe.rare === 'pulsar') state.counts.pulsarSystems++;
   if (universe.rare === 'dwarf') state.counts.dwarfSystems++;
   if (universe.rare === 'young') state.counts.youngSystems++;
@@ -414,7 +418,8 @@ function rendezvous(src, kind) {
   w = {
     isRendezvous: true, kind, src, mass: 0, explored: true,
     name: kind === 'comet' ? `COMET ${src.name}` : src.name,
-    radius: kind === 'station' ? 26 : kind === 'comet' ? src.size : kind === 'derelict' || kind === 'beacon' ? src.radius : 12,
+    radius: kind === 'station' ? 26 : kind === 'comet' ? src.size : kind === 'derelict' || kind === 'beacon' ? src.radius
+      : kind === 'wormhole' ? 60 : kind === 'whales' ? 800 : kind === 'dyson' ? 200 : kind === 'fortress' ? src.radius : 12,
     get pos() { return src.pos; }, get velocity() { return src.velocity ?? src.vel; },
   };
   wrappers.set(src, w);
@@ -428,6 +433,11 @@ function serviceTarget() {
   const sos = near(u.ships.filter((s) => s.distress && !inGiantAir(u, s.pos)), 70_000);
   if (sos) return rendezvous(sos, 'distress');
   if (u.beacon) return rendezvous(u.beacon, u.beacon.kind);
+  // wonders worth a detour (more often for the sightseeing styles; the daredevil goes for the fortress)
+  const W = u.wonders, P = persona(state.options.persona), keen = P.comet + (P.tour > 0.5 ? 0.2 : 0);
+  if (W?.whales && !W.whales.recorded && Math.random() < keen + 0.2) return rendezvous(W.whaleTarget, 'whales');
+  if (W?.dyson && !W.dyson.scanned && Math.random() < keen + 0.2) return rendezvous(W.dysonTarget, 'dyson');
+  if (W?.fortress && !W.fortress.scanned && state.options.persona === 'daredevil' && Math.random() < 0.5) return rendezvous(W.fortress, 'fortress');
   const max = shipStats(state).cargoMax;
   const needs = state.hull < 45 || state.cargo >= max * 0.8 || (f.on && f.level < 0.3 * f.capacity);
   const st = needs ? near(u.stations ?? [], 90_000) : null;
@@ -437,6 +447,57 @@ function serviceTarget() {
     if (c) return rendezvous(c, 'comet');
   }
   return null;
+}
+
+// ---- wonders: Dyson swarms, the fortress and its superlaser, wormholes, star whales ----
+let lockToast = 0, hitToast = 0;
+function onWonder(e) {
+  const u = universe, ship = u.ship;
+  if (e.kind === 'dyson') {
+    state.credits += 150; state.counts.dysons++;
+    ui.toast(`DYSON SWARM SURVEYED: ${Math.round(e.dyson.complete * 100)}% complete. +150 CR`, 'good'); say('dyson');
+    postcard({ focus: ship.pos, other: u.star, caption: 'A Dyson swarm', sub: u.star.name, force: true });
+  } else if (e.kind === 'fortress-lock') {
+    sound.alarm(); cam.addTrauma(0.2);
+    if (performance.now() - lockToast > 15_000) { lockToast = performance.now(); ui.toast(`!! ${e.fortress.name.toUpperCase()} IS LOCKING ON !!`, 'bad'); say('lock'); }
+  } else if (e.kind === 'fortress-fire') {
+    sound.explode();
+    const d = dist(e.fortress.pos, ship.pos);
+    cam.addTrauma(clamp(0.7 * (1 - d / 40_000), 0.15, 0.7));
+    queueReplay(6, e.fortress, `SUPERLASER: ${e.fortress.name.toUpperCase()}`);
+  } else if (e.kind === 'beam-hit') {
+    damageHull(70 * e.dt, 'superlaser');
+    cam.addTrauma(0.5);
+    if (performance.now() - hitToast > 4000) { hitToast = performance.now(); ui.toast('HIT BY THE SUPERLASER', 'bad'); say('hit'); buzz([80, 40, 80]); }
+  } else if (e.kind === 'fortress-miss') {
+    state.counts.dodges++;
+    if (dist(e.fortress.pos, ship.pos) < 40_000) { ui.toast('SUPERLASER MISSED', 'good'); say('dodge'); }
+  } else if (e.kind === 'fortress-scan') {
+    state.credits += 500; state.counts.fortressScans++;
+    ui.toast(`INSIDE ${e.fortress.name.toUpperCase()}'S GUARD: weak spot scanned, it has gone quiet. +500 CR`, 'good'); say('weakspot'); sound.fanfare();
+    postcard({ focus: ship.pos, other: e.fortress, caption: `Inside the guard of ${e.fortress.name}`, sub: u.star.name, force: true });
+    if (autopilot.target?.src === e.fortress) autopilot.leave(autopilot.target);
+  } else if (e.kind === 'beam-scar') {
+    if (dist(e.at, ship.pos) < 60_000) { ui.toast(`THE SUPERLASER STRUCK ${e.body.name.toUpperCase()}`, 'bad'); logEvent(`Superlaser struck ${e.body.name}`); }
+  } else if (e.kind === 'wormhole') {
+    state.counts.wormholes++;
+    flash.style.transition = ''; flash.style.opacity = '0.8';
+    setTimeout(() => { flash.style.transition = 'opacity 0.8s'; flash.style.opacity = '0'; }, 60);
+    cam.snap(u, w, h); cam.addTrauma(0.5); sound.swell();
+    ui.toast('THROUGH THE WORMHOLE', 'good'); say('wormhole');
+    if (autopilot.target?.kind === 'wormhole') autopilot.leave(autopilot.target);
+  } else if (e.kind === 'wormhole-out') {
+    state.counts.wormholes++;
+    ui.toast('THE WORMHOLE LEADS ELSEWHERE...', 'good'); say('wormhole');
+    jumpTo(1 + Math.floor(Math.random() * 9_999_999));
+  } else if (e.kind === 'whales') {
+    state.credits += 120; state.counts.whales++;
+    ui.toast(`STAR WHALES: recorded the ${e.whales.name}'s song. +120 CR`, 'good'); say('whales'); sound.whale();
+    const c = u.wonders.whaleCenter;
+    postcard({ focus: ship.pos, other: c, caption: `Star whales: the ${e.whales.name}`, sub: u.star.name, force: true });
+    if (autopilot.target?.kind === 'whales') autopilot.leave(autopilot.target);
+  }
+  persist();
 }
 
 // ---- world events: storms, eruptions, distress calls ----
@@ -564,7 +625,7 @@ window.addEventListener('resize', resize);
 resize();
 
 // ---- start ----
-let strandedFor = 0;
+let strandedFor = 0, usedWormholeExit = false;
 let lastDiscovery = 0, allChartedAt = 0, wanderingSince = 0; // (sim time, so warp counts properly)
 const away = { charted: 0, missions: 0, systems: 0, credits: state.credits, since: 0 };
 {
@@ -615,6 +676,8 @@ warpBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
 function warpCeiling() {
   const u = universe, ship = u.ship;
   if (ship.consumed || u.tidal > 0.02 || jump) return 1;
+  const fort = u.wonders?.fortress;
+  if (fort && !fort.scanned && fort.pos && dist(fort.pos, ship.pos) < fort.range * 1.2) return fort.state === 'idle' || fort.state === 'cool' ? 2 : 1;
   if (ship.landing) return 16;
   if (mag(ship.thrust) > 0 && !autopilot.enabled) return 1;
   if ((ship.heatRate ?? 0) > 0.05 || (ship.atmoRho ?? 0) > 0.002) return 1;
@@ -900,6 +963,13 @@ function cruiseThink(dt) {
   const stale = u.now - lastDiscovery > 600 * patience;
   // never leave in the middle of an errand, or with someone calling for help
   if (autopilot.service || u.ships.some((sh) => sh.distress)) return;
+  // a wormhole that leads elsewhere is a more spectacular way out than the jump drive
+  const out = u.wonders?.wormholes?.find((m) => m.out);
+  if ((doneHere || stale) && out && !autopilot.service && !usedWormholeExit) {
+    usedWormholeExit = true;
+    autopilot.target = rendezvous(out, 'wormhole'); autopilot.service = true; autopilot.lock = 0; autopilot.via = null;
+    ui.toast('HEADING FOR THE WORMHOLE'); return;
+  }
   if (doneHere || stale) jumpTo(state.story.target && !state.story.done && state.story.target !== seed ? state.story.target : 1 + Math.floor(Math.random() * 9_999_999));
 }
 
@@ -961,12 +1031,26 @@ function tick(ms) {
   if (maneuver.node?.burning) wantWarp = 1;
   u.warp = Math.min(wantWarp, warpCeiling());
 
+  // the autopilot dodges a superlaser lock: burn square to the line the fortress is aiming down
+  const threat = u.wonders?.threat;
+  if (threat && autopilot.enabled && !manual) {
+    const away = sub(u.ship.pos, threat.pos), side = fromAngle(angleOf(away) + Math.PI / 2, 1);
+    // dodge one way while it tracks; once it commits its aim (the last half second), jink back the other way
+    if (!autopilot.evade || autopilot.evade.from !== threat) {
+      const sign = side.x * u.ship.velocity.x + side.y * u.ship.velocity.y >= 0 ? 1 : -1; // keep going the way we already drift
+      autopilot.evade = { from: threat, sign };
+    }
+    const jink = threat.timer < 0.6 ? -1 : 1;
+    autopilot.evade.dir = angleOf(mul(side, autopilot.evade.sign * jink));
+    autopilot.evade.until = u.now + threat.timer + 1.5;
+  }
   const fuelBefore = u.fuel.level;
   u.step(ms / 1000);
   updateJump(u.frameDt);
   const simDt = u.frameDt * u.timeScale * u.warp;
   replay.record(u);
   signalTick();
+  u.wonders?.update(simDt);
   outpostIncome(G, simDt);
   dailyTick(G, simDt, Math.max(0, fuelBefore - u.fuel.level));
   // the music tenses up when the ship is in trouble

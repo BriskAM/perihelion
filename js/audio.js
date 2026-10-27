@@ -138,6 +138,7 @@ export class Sound {
   swell() { [0, 7, 12, 16, 19, 24].forEach((n, i) => this.tone(semis(196, n), 0.9 - i * 0.08, { delay: i * 0.09, gain: 0.07, type: 'triangle' })); }
   arrive() { [[0, 4, 7], [5, 9, 12], [7, 11, 14], [0, 4, 7, 12]].forEach((ch, k) => ch.forEach((n) => this.tone(semis(131, n), 1.1, { delay: k * 0.55, gain: 0.05, type: 'sine' }))); }
   eerie() { [0, 1, 0, 1, 6].forEach((n, i) => this.tone(semis(440, n), 0.35, { delay: i * 0.32, gain: 0.05, type: 'sine' })); }
+  whale() { [[0, -5], [7, 2], [-2, -9]].forEach(([a, b], i) => this.tone(semis(110, a), 2.2, { to: semis(110, b), delay: i * 1.1, gain: 0.08, type: 'sine' })); }
   alarm() { this.tone(880, 0.12, { type: 'square', gain: 0.06 }); this.tone(660, 0.12, { type: 'square', gain: 0.06, delay: 0.14 }); }
   /** 0..1: how much danger the ship is in (heat, a hull close to failing, a pulsar beam). The pad sags and wavers. */
   setTension(k) {

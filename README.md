@@ -157,6 +157,21 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
 - **Music**: the score swells through slingshots, plays a chord on arrival, an eerie motif for the Signal,
   and the pad sags and wavers when the ship is in danger.
 
+## Wonders
+Rare things a system may hold (the HUD lists them on arrival):
+- **Dyson swarms**: rings of collectors round the star, dimming the light its worlds get. Fly through the
+  swarm to survey it.
+- **Fortresses**: a battle station orbiting a world. Come within range and in its sight and it turns its dish,
+  locks on (a red targeting line on where it expects you to be), charges and fires a superlaser. The beam
+  vaporises belt rock, wrecks AI ships and scars any world it hits. It commits its aim just before it fires,
+  so a late jink dodges it (the autopilot does this itself). Get within its guard to scan a weak spot and it
+  goes quiet.
+- **Wormholes**: two mouths joined through nowhere. Fly into one, come out of the other; an unstable one
+  leads to another system, and cruise likes to leave that way.
+- **Star whales**: a pod of vast glowing creatures swimming slow orbits round the star. Drift alongside to
+  record their song.
+`?wonder=dyson` (or fortress, wormhole, whales, all) forces one into a system, for testing.
+
 ## Autopilot styles (K, or MENU > OPTIONS)
 The autopilot has personalities: the same pilot with different dials (speed, slingshot appetite and how
 tight it swings, scan depth, orbit tours, landing style, dwell, cruise warp, comet detours, how long it

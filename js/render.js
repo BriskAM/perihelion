@@ -66,7 +66,7 @@ function lightFor(u, p) {
     const d = dist(s.pos, p.pos);
     if (d < bd) { bd = d; best = s; }
   }
-  if (best) return { x: best.pos.x, y: best.pos.y, k: 1 };
+  if (best) return { x: best.pos.x, y: best.pos.y, k: u.wonders?.dysonDim ?? 1 }; // a Dyson swarm keeps most of the light
   const bh = u.blackHoles[0]; // only an accretion disk to see by
   return bh ? { x: bh.pos.x, y: bh.pos.y, k: 0.7 } : null;
 }
@@ -973,6 +973,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false, extra = {})
   }
 
   for (const belt of u.belts) drawBelt(ctx, view, belt, u.now, px);
+  u.wonders?.draw(ctx, view, px, u.now, true); // (the far side of a Dyson swarm, behind its star)
   for (const wl of u.wells) {
     if (wl.isBlackHole) drawBlackHole(ctx, view, wl, u.now, px);
     else drawStar(ctx, view, wl, u.now, px, u);
@@ -981,6 +982,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false, extra = {})
   drawDebris(ctx, u, view, px);
   if (!lite) for (const sp of u.sparks) drawSpark(ctx, sp, px);
   for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
+  u.wonders?.draw(ctx, view, px, u.now, false);
   if (extra.pred) drawPrediction(ctx, extra.pred, px);
   if (extra.ghost) drawGhost(ctx, extra.ghost, px);
   if (u.beacon) drawBeacon(ctx, view, u.beacon, u.now, px);

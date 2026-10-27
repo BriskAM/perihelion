@@ -39,6 +39,13 @@ const LINES = {
   hull: { any: ['Hull gave out. Waking up in the medbay. Again.'] },
   outpost: { any: ['Dropped a relay over {name}. Ours now.'] },
   wing: { any: ['Wingman charted {name}. Good kid.'] },
+  dyson: { any: ['A Dyson swarm. Somebody built a shell round a whole star. Nobody answers the hail.', 'Flew through the collectors of a Dyson swarm. The star behind them is a dim orange coal.'] },
+  lock: { any: ['Targeting lock from that station. That is a very big dish.', 'The fortress is turning to face us. Not good.'], daredevil: ['It is locking on. Excellent.'] },
+  dodge: { any: ['Superlaser missed. Felt the heat through the hull.', 'It fired where we were going to be. We were not there.'] },
+  hit: { any: ['Took a glancing hit from the superlaser. Half the panels are screaming.'] },
+  weakspot: { any: ['Got inside its guard and scanned a weak spot. It has gone very quiet.'] },
+  wormhole: { any: ['Through the wormhole. The stars smeared, then snapped back somewhere else.', 'In one side, out the other. Physics can take the rest of the day off.'] },
+  whales: { any: ['Star whales. A whole pod of them, singing in radio. Recorded every note.', 'They swam right past the window. Bigger than the ship. Glowing.'] },
 };
 
 const fill = (t, d) => t.replace(/\{(\w+)\}/g, (_, k) => (d[k] ?? '').toString());

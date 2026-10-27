@@ -782,6 +782,14 @@ export class Autopilot {
       this.debug = '';
       return;
     }
+    // evasive action: a fortress is locking on, so get off the line it is aiming down (full burn, sideways)
+    if (this.evade && sim.now < this.evade.until && !ship.landing) {
+      this.strategy = 'EVADE!';
+      this.debug = 'superlaser lock';
+      this.setAngle(this.evade.dir, 9);
+      ship.thrust = Math.abs(wrap(this.evade.dir - ship.angle)) < 0.5 ? fromAngle(ship.angle, 1) : vec();
+      return;
+    }
     // reentry emergency: heating well above the comfort level means slow down and climb, whatever the plan said
     if (this.assist && ship.heatRate > 0.55 && ship.atmoPlanet && !ship.landing) {
       const p = ship.atmoPlanet, away = unit(sub(ship.pos, p.pos));

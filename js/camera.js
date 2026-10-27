@@ -58,7 +58,8 @@ export class Camera {
     const speed = ship.landing ? 0 : mag(rv);
 
     // speed: see about two seconds ahead; proximity: keep the nearest surface on screen
-    let lz = Math.log(0.42 * minDim / (speed * 2.2 + 260));
+    // see about 1.3 s ahead (more than that and, with ships drawn to scale, the ship shrinks to a speck)
+    let lz = Math.log(0.42 * minDim / (speed * 1.3 + 260));
     const zSpeed = Math.exp(lz);
     const near = Math.log(0.36 * minDim / (dSurf + 110 + ref.radius * 0.04));
     lz = lerp(lz, Math.min(lz, near), smoothstep(34_000, 9_000, dSurf));
@@ -67,7 +68,7 @@ export class Camera {
     const tgt = ap && ap.enabled ? ap.focus : null;
     if (tgt && !ship.landing) {
       const dt = dist(tgt.pos, ship.pos);
-      const k = smoothstep(40_000, 12_000, dt - tgt.radius);
+      const k = smoothstep(22_000, 7_000, dt - tgt.radius);
       const zt = Math.log(0.4 * minDim / (dt * 0.6 + tgt.radius * 0.7 + 150));
       lz = lerp(lz, Math.min(lz, zt), k);
       ox += (tgt.pos.x - ship.pos.x) * 0.3 * k; oy += (tgt.pos.y - ship.pos.y) * 0.3 * k;
@@ -91,7 +92,10 @@ export class Camera {
     const moving = !ship.landing && base.speed > 350;
     const options = [['chase', 3]];
     if (moving) options.push(['flyby', 3], ['wide', 2]);
-    if (tgt || base.dSurf < 6000) options.push(['planet', ap?.via ? 7 : 3]);
+    // the planet shot frames the ship and its target together, so only when they are close enough for
+    // that to still be a close-up (otherwise it is a whole-system shot with the ship as a speck)
+    const near = tgt && Math.hypot(tgt.pos.x - ship.pos.x, tgt.pos.y - ship.pos.y) - tgt.radius < 22_000;
+    if (near || base.dSurf < 6000) options.push(['planet', ap?.via && near ? 7 : 3]);
     if (ap?.via && moving) options.push(['flyby', 4]);
     if (!ship.landing && base.dSurf > 9000) options.push(['system', 0.7]);
     if (ship.landing) options.push(['low', 3]);
@@ -108,7 +112,7 @@ export class Camera {
       const side = (Math.random() < 0.5 ? -1 : 1) * (0.14 * Math.min(w, h)) / base.zoom;
       shot.px = ship.pos.x + (v.x / sp) * ahead - (v.y / sp) * side;
       shot.py = ship.pos.y + (v.y / sp) * ahead + (v.x / sp) * side;
-      shot.zoom = base.zoom * 0.85;
+      shot.zoom = Math.max(base.zoom * 0.85, 0.12); // close enough that the ship is a ship as it passes
       shot.dur = 7;
     } else shot.dur = { chase: 14, wide: 10, planet: 12, system: 7, low: 12 }[name] ?? 10;
     shot.dur *= (0.8 + Math.random() * 0.5) * (this.style?.shotLen ?? 1);
@@ -129,9 +133,9 @@ export class Camera {
       const s = this.shot, ship = u.ship, minDim = Math.min(w, h);
       if (s.name === 'wing' && u.wing) { // check in on the wingman
         const wg = u.wing, wd = Math.hypot(wg.pos.x - ship.pos.x, wg.pos.y - ship.pos.y);
-        want = { zoom: Math.min(1.2, (0.4 * minDim) / (Math.hypot(wg.velocity.x, wg.velocity.y) * 2.2 + 300)), ox: wg.pos.x - ship.pos.x, oy: wg.pos.y - ship.pos.y, omega: wd > 30_000 ? 0.8 : 1.4 };
-      } else if (s.name === 'chase') want = { zoom: Math.max(base.zoom, base.zSpeed) * 1.5, ox: base.ox * 0.35, oy: base.oy * 0.35, omega: 1.6 };
-      else if (s.name === 'wide') want = { zoom: base.zoom * 0.3, ox: base.ox * 2, oy: base.oy * 2, omega: 1.1 };
+        want = { zoom: Math.max(0.15, Math.min(1.2, (0.4 * minDim) / (Math.hypot(wg.velocity.x, wg.velocity.y) * 1.3 + 300))), ox: wg.pos.x - ship.pos.x, oy: wg.pos.y - ship.pos.y, omega: wd > 30_000 ? 0.8 : 1.4 };
+      } else if (s.name === 'chase') want = { zoom: Math.max(base.zoom, base.zSpeed * 1.5, 0.25), ox: base.ox * 0.35, oy: base.oy * 0.35, omega: 1.6 }; // close enough to see the hull
+      else if (s.name === 'wide') want = { zoom: Math.max(base.zoom * 0.45, 0.03), ox: base.ox * 2, oy: base.oy * 2, omega: 1.1 };
       else if (s.name === 'low') want = { zoom: base.zoom * 0.55, ox: base.ox, oy: base.oy, omega: 1 };
       else if (s.name === 'flyby') {
         want = { zoom: s.zoom, ox: s.px - ship.pos.x, oy: s.py - ship.pos.y, omega: 7 };
@@ -140,7 +144,7 @@ export class Camera {
       } else if (s.name === 'planet') {
         const p = ap?.focus ?? base.ref;
         const d = dist(p.pos, ship.pos);
-        const span = Math.max(d + p.radius * 1.15, p.radius * 2.6);
+        const span = Math.min(Math.max(d + p.radius * 1.15, p.radius * 2.6), Math.max(25_000, p.radius * 3)); // never a whole-system pull-out
         want = { zoom: (0.42 * minDim) / span, ox: (p.pos.x - ship.pos.x) * 0.55, oy: (p.pos.y - ship.pos.y) * 0.55, omega: 1.2 };
       } else if (s.name === 'system') {
         const R = Math.max(mag(ship.pos) * 1.15, 30_000);

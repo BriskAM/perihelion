@@ -55,6 +55,7 @@ export function createHud(g) {
       ...(comets ? [`COMETS: ${comets}`] : []),
       `BODIES: ${explored.length} / ${u.planets.length}`,
       ...(g.state.cruise ? [`SYSTEMS VISITED: ${g.state.stats.systems + 1}`] : []),
+      ...(u.wonders?.list.length ? [`WONDERS: ${u.wonders.list.map((k) => ({ dyson: 'Dyson swarm', fortress: 'a fortress (it shoots)', wormhole: 'wormholes', whales: 'star whales' })[k]).join(', ')}`] : []),
       ...(u.rare ? [`  RARE: ${{ pulsar: 'pulsar (mind the beams)', dwarf: 'brown dwarf (everything frozen)', young: 'young system (debris disk)' }[u.rare]}`] : []),
       ...(g.state.story.target && !g.state.story.done ? [`SIGNAL: ${g.state.story.target === g.seed ? (u.beacon ? 'source in this system' : '...') : `points to ${g.state.story.targetName}`}`] : []),
       ...(u.wing ? [`  WING: ${u.wing.name} (${persona(g.state.wing.persona).name})`] : []),

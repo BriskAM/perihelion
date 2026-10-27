@@ -30,12 +30,18 @@ export const ACHIEVEMENTS = [
   ['wing', 'Wingman', 'Hire a wingman', (c) => c.wing >= 1],
   ['daily', 'Daily driver', 'Finish a daily challenge', (c) => c.dailies >= 1],
   ['node', 'By the numbers', 'Fly a planned burn', (c) => c.nodes >= 1],
+  ['dyson', 'Kardashev', 'Fly through a Dyson swarm', (c) => c.dysons >= 1],
+  ['dodge', 'Not today', 'Dodge three superlaser shots', (c) => c.dodges >= 3],
+  ['weakspot', 'Weak spot', 'Get inside a fortress’s guard and scan it', (c) => c.fortressScans >= 1],
+  ['wormhole', 'Shortcut', 'Travel through a wormhole', (c) => c.wormholes >= 1],
+  ['whales', 'Whale song', 'Record a pod of star whales', (c) => c.whales >= 1],
 ];
 
 export function blankCounts() {
   return {
     slingshots: 0, bestTurn: 0, scans: 0, stormScans: 0, comets: 0, rescues: 0, oreSold: 0, stationDocks: 0,
     systems: 1, blackHoleSystems: 0, binarySystems: 0, tours: 0, orbitsHeld: 0, eruptionsSeen: 0, cometStrikes: 0, postcards: 0,
+    dysons: 0, dodges: 0, fortressScans: 0, wormholes: 0, whales: 0,
     beacons: 0, derelicts: 0, pulsarSystems: 0, dwarfSystems: 0, youngSystems: 0, outposts: 0, wing: 0, dailies: 0, nodes: 0,
   };
 }
