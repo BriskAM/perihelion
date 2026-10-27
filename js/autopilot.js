@@ -82,7 +82,7 @@ export class Autopilot {
     return [
       '---- AUTOPILOT ENGAGED ----',
       'TGT: ' + (this.target ? this.target.name.toUpperCase() + (this.service ? ` (${this.target.kind === 'distress' ? 'RESCUE' : this.target.kind === 'station' ? 'DOCK' : 'RENDEZVOUS'})` : this.uncharted ? ' (UNCHARTED)' : this.tour ? ' (ORBIT TOUR)' : this.scanPass ? ' (SCAN PASS)' : this.relay ? ' (RELAY)' : this.wandering ? ' (REVISIT)' : '') : 'SELECTING...') +
-        (this.via ? `  VIA ${this.via.body.name.toUpperCase()}` : ''),
+        (this.via && this.via.body !== this.target ? `  VIA ${this.via.body.name.toUpperCase()}` : ''),
       'EXE: ' + this.strategy + lock + (this.debug ? ` (${this.debug})` : ''),
     ].join('\n');
   }
@@ -226,26 +226,38 @@ export class Autopilot {
    */
   planAssist(target) {
     if (!this.assist) return null;
-    const u = this.universe, s = this.ship.pos, rnd = this.rng ?? Math.random;
+    const u = this.universe, s = this.ship.pos, rnd = this.rng ?? Math.random, P = this.persona;
     const dT = dist(s, target.pos);
     if (dT < 14_000) return null;
+    const vInf = this.ai ? 800 + rnd() * 350 : P.vInf[0] + rnd() * (P.vInf[1] - P.vInf[0]);
+    const toT = Math.atan2(target.pos.y - s.y, target.pos.x - s.x);
     let best = null, bestScore = 0;
     for (const g of u.planets) {
       if (g === target || g.isMoon || g.isAnchor || g === target.parent || g.radius < 650) continue;
       if (g.parent || g.binary) continue; // binary pairs make for messy slingshots
       const dG = dist(s, g.pos), dGT = dist(g.pos, target.pos);
-      if (dG < 6000 || dGT < 6000) continue;
+      if (dG < 6000 || dGT < 6000 || dG > dT * 0.85) continue; // it has to be on the way, not past the target
+      // Useful means: it is roughly between us and the target (a modest detour, inside a 40 degree cone),
+      // and the turn we need there (from the way we arrive to the way to the target) is one its pull can
+      // actually give us at this approach speed. Anything else is a trip to the far side for nothing.
       const detour = (dG + dGT) / dT;
-      if (detour > this.persona.detour || this.pathBlockedByStar(g)) continue;
-      const score = g.mass / detour ** 3;
+      if (detour > Math.min(P.detour, this.ai ? 1.3 : P.detour > 1.5 ? 1.4 : 1.25)) continue;
+      const toG = Math.atan2(g.pos.y - s.y, g.pos.x - s.x);
+      if (Math.abs(wrap(toG - toT)) > 0.7) continue;
+      const out = Math.atan2(target.pos.y - g.pos.y, target.pos.x - g.pos.x);
+      const need = Math.abs(wrap(out - toG)); // the bend the swing has to give us
+      const top = g.atmo ? g.atmo.top : 0, rp = g.radius + top + Math.max(120, g.radius * 0.2);
+      const mu = GRAVITATION * SPACECRAFT_MASS * g.mass, e = 1 + (rp * vInf * vInf) / mu;
+      const can = 2 * Math.asin(1 / e); // the most a pass this close can bend us
+      if (need < 0.12 || need > can * 0.9 || this.pathBlockedByStar(g)) continue;
+      const score = (g.mass / detour ** 4) * (need / can); // big, on the way, and actually needed
       if (score > bestScore) { best = g; bestScore = score; }
     }
     if (!best) return null;
-    const P = this.persona;
     const chance = this.ai ? 0.25 : this.wandering ? P.assistWander : P.assist;
     if (rnd() > chance) return null;
     const top = best.atmo ? best.atmo.top : 0;
-    return { body: best, rp: best.radius + top + Math.max(this.ai ? 220 : 120, best.radius * (this.ai ? 0.3 : P.passAlt)), phase: 'approach', since: u.now, vInf: this.ai ? 800 + rnd() * 350 : P.vInf[0] + rnd() * (P.vInf[1] - P.vInf[0]) };
+    return { body: best, rp: best.radius + top + Math.max(this.ai ? 220 : 120, best.radius * (this.ai ? 0.3 : P.passAlt)), phase: 'approach', since: u.now, vInf };
   }
 
   /** A scan pass: swing past the target giant itself, low over the clouds. */
@@ -316,7 +328,8 @@ export class Autopilot {
     const inbound = dot(rel, relV) < 0;
     const o = inbound ? conic(g, rel.x, rel.y, relV.x, relV.y, 24) : null;
     const floor = g.radius + (g.atmo ? g.atmo.top : 0) + 110;
-    const dodge = this.moonDodge(ship, g);
+    // dodge its moons, and (binary giants) the partner world and its air, which the swing can fling us at
+    const dodge = v.away ? add(this.moonDodge(ship, g), this.avoidBody(ship, v.away, v.away.radius + (v.away.atmo ? v.away.atmo.top : 0) + 500)) : this.moonDodge(ship, g);
     const sp = mag(relV) || 1, out = unit(sub(rel, mul(relV, dot(rel, relV) / (sp * sp)))); // square to our motion, away from the world
     // corrections stick until they are done (switching heading every frame meant never lining up to burn)
     const pe = o ? o.pe : Infinity;
@@ -342,11 +355,16 @@ export class Autopilot {
       this.strategy = v.scan ? (g.explored ? 'SCAN: DONE' : 'SCAN PASS') : 'SLINGSHOT';
     }
     this.debug = `${g.name}  pe ${Math.round(v.minD - g.radius)}  v ${Math.round(mag(relV))}`;
-    if (!inbound && d > Math.max(v.b * 1.5, g.radius * 4)) {
+    const clearOfPartner = !v.away || (dist(ship.pos, v.away.pos) > v.away.radius * 4 && dot(sub(ship.pos, v.away.pos), sub(ship.velocity, v.away.velocity)) > 0);
+    if (!inbound && d > Math.max(v.b * 1.5, g.radius * 4) && clearOfPartner) {
       const gain = mag(ship.velocity) - v.entrySpeed;
       const turn = Math.abs(wrap(angleOf(ship.velocity) - v.entryDir)) * (180 / Math.PI);
       if (this.onEvent) this.onEvent({ kind: v.scan ? 'scan' : 'assist', body: g, gain, turn, pe: v.minD - g.radius });
-      if (v.scan) { this.leave(g); return true; } // charted on the way past: on to the next world
+      if (v.scan) { // charted on the way past: climb clear of it (and any partner) before heading on
+        this.leave(g);
+        this.departFrom = g; this.departUntil = now + 30;
+        return true;
+      }
       this.via = null;
       return false;
     }
@@ -627,6 +645,19 @@ export class Autopilot {
     return vec(nx * 700, ny * 700);
   }
 
+  /**
+   * A velocity nudge that keeps us out of a sphere of `clear` around body b: project both on straight
+   * lines for the next few seconds and, if the closest approach is inside it, push away from it.
+   */
+  avoidBody(ship, b, clear) {
+    const p = sub(b.pos, ship.pos), v = sub(b.velocity, ship.velocity), v2 = v.x * v.x + v.y * v.y;
+    const tca = v2 < 1 ? 0 : clamp(-(p.x * v.x + p.y * v.y) / v2, 0, 8);
+    const miss = add(p, mul(v, tca)), m = mag(miss);
+    if (m >= clear) return vec();
+    const away = m > 1 ? mul(miss, -1 / m) : unit(vec(-v.y, v.x));
+    return mul(away, 900 * (1 - m / clear) * (1 - tca / 10));
+  }
+
   /** Burn toward the wanted velocity `vDes` (relative to the target), but only once pointed that way. */
   burnToward(ship, vDes, relativeV, gain = 250, turn = this.turn) {
     const dv = sub(vDes, relativeV), m = mag(dv);
@@ -836,7 +867,9 @@ export class Autopilot {
       else {
         this.strategy = 'DEPARTING';
         this.debug = `${Math.round((mag(relV) / vEsc) * 100)}% of escape`;
-        this.burnToward(ship, mul(unit(relV), 1.25 * vEsc), relV, 250, 6);
+        let want = mul(unit(relV), 1.25 * vEsc);
+        if (p.binary) want = add(want, this.avoidBody(ship, p.binary, p.binary.radius + (p.binary.atmo ? p.binary.atmo.top : 0) + 500));
+        this.burnToward(ship, want, relV, 250, 6);
         return;
       }
     }

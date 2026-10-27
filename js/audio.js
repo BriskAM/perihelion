@@ -73,7 +73,8 @@ export class Sound {
     const key = blackHole ? 'X' : cls;
     if (key === this.padKey) return;
     this.padKey = key;
-    const root = blackHole ? 82 : ROOTS[cls] ?? 262, minor = blackHole || cls === 'M' || cls === 'K';
+    const root = blackHole ? 82 : ROOTS[cls] ?? (cls === 'N' ? 330 : cls === 'D' ? 98 : 262);
+    const minor = blackHole || cls === 'M' || cls === 'K' || cls === 'D';
     const notes = [0, minor ? 3 : 4, 7, -12];
     this.pad.forEach((p, i) => p.o.frequency.setTargetAtTime(semis(root, notes[i]), this.ctx.currentTime, 2));
   }
@@ -133,5 +134,16 @@ export class Sound {
   explode() { this.burst(1.1, { freq: 2000, to: 40, gain: 0.5 }); this.tone(90, 0.8, { to: 25, type: 'sawtooth', gain: 0.25 }); }
   swallowed() { this.tone(300, 2.2, { to: 24, type: 'sawtooth', gain: 0.22 }); this.burst(2.2, { freq: 900, to: 30, gain: 0.2 }); }
   lockTick(progress) { this.tone(500 + progress * 900, 0.05, { type: 'square', gain: 0.05 }); }
+  // music cues: the score follows the story
+  swell() { [0, 7, 12, 16, 19, 24].forEach((n, i) => this.tone(semis(196, n), 0.9 - i * 0.08, { delay: i * 0.09, gain: 0.07, type: 'triangle' })); }
+  arrive() { [[0, 4, 7], [5, 9, 12], [7, 11, 14], [0, 4, 7, 12]].forEach((ch, k) => ch.forEach((n) => this.tone(semis(131, n), 1.1, { delay: k * 0.55, gain: 0.05, type: 'sine' }))); }
+  eerie() { [0, 1, 0, 1, 6].forEach((n, i) => this.tone(semis(440, n), 0.35, { delay: i * 0.32, gain: 0.05, type: 'sine' })); }
+  alarm() { this.tone(880, 0.12, { type: 'square', gain: 0.06 }); this.tone(660, 0.12, { type: 'square', gain: 0.06, delay: 0.14 }); }
+  /** 0..1: how much danger the ship is in (heat, a hull close to failing, a pulsar beam). The pad sags and wavers. */
+  setTension(k) {
+    if (!this.ctx || Math.abs((this.tension ?? 0) - k) < 0.05) return;
+    this.tension = k;
+    for (const p of this.pad) p.o.detune.setTargetAtTime(-60 * k, this.ctx.currentTime, 0.8);
+  }
   fanfare() { [0, 4, 7, 12].forEach((n, i) => this.tone(semis(392, n), 0.5, { delay: i * 0.1, gain: 0.14, type: 'triangle' })); }
 }

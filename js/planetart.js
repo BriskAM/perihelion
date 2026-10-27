@@ -323,6 +323,24 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now 
         }
       }
       ctx.restore();
+      // ice caps (they do not turn with the ground): bigger in winter, far out on the orbit
+      if (!p.gas && explored && ['temperate', 'cold', 'frozen'].includes(p.climate)) {
+        const base = p.climate === 'frozen' ? 0.34 : p.climate === 'cold' ? 0.22 : 0.12;
+        const cap = Math.min(0.75, Math.max(0.04, base / (p.season ?? 1) ** 2));
+        ctx.save();
+        ctx.translate(p.pos.x, p.pos.y); ctx.scale(R, R);
+        ctx.fillStyle = 'rgba(235,245,255,0.38)';
+        ctx.beginPath(); ctx.ellipse(0, -1, 1.05, cap, 0, 0, PI2); ctx.ellipse(0, 1, 1.05, cap * 0.85, 0, 0, PI2); ctx.fill();
+        ctx.restore();
+      }
+      if (p.tideMoon && v.kind === 'ocean' && explored) { // the sea heaps up toward the moon (and away from it)
+        const m = p.tideMoon, ta = Math.atan2(m.pos.y - p.pos.y, m.pos.x - p.pos.x);
+        ctx.save();
+        ctx.translate(p.pos.x, p.pos.y); ctx.rotate(ta);
+        ctx.strokeStyle = tint(color, 0.35); ctx.lineWidth = 2 * px;
+        ctx.beginPath(); ctx.ellipse(0, 0, R * 1.0, R * 0.93, 0, 0, PI2); ctx.stroke();
+        ctx.restore();
+      }
       if (v.clouds && explored) { // clouds drift a little faster than the ground
         ctx.save();
         ctx.translate(p.pos.x, p.pos.y);

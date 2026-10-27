@@ -4,6 +4,10 @@ import { loadPostcards } from './postcards.js';
 import { ACHIEVEMENTS } from './achievements.js';
 import { STAR_COLORS } from './universe.js';
 import { PERSONALITIES } from './personalities.js';
+import { dailyGoal, dailyState, DAILY_GOALS, OUTPOST_COST, OUTPOST_PAY, WING_COST } from './outposts.js';
+import { STAGES } from './story.js';
+import { THEMES } from './themes.js';
+void DAILY_GOALS;
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -21,7 +25,7 @@ export function createUI({ state, game, actions }) {
   const toasts = document.getElementById('toasts');
   let tab = 'missions';
 
-  const TABS = [['missions', 'MISSIONS'], ['postcards', 'POSTCARDS'], ['galaxy', 'GALAXY'], ['codex', 'CODEX'], ['ship', 'SHIP'], ['options', 'OPTIONS']];
+  const TABS = [['missions', 'MISSIONS'], ['log', 'LOG'], ['postcards', 'POSTCARDS'], ['galaxy', 'GALAXY'], ['codex', 'CODEX'], ['ship', 'SHIP'], ['options', 'OPTIONS']];
   for (const [id, label] of TABS) {
     const b = el('button', 'tab', label);
     b.dataset.tab = id;
@@ -60,6 +64,26 @@ export function createUI({ state, game, actions }) {
 
   function renderMissions() {
     const { universe, missions } = game;
+    // the daily challenge
+    const goal = dailyGoal(), d = dailyState(state);
+    const daily = el('div', 'card');
+    daily.append(el('div', 'title', `DAILY CHALLENGE ${d.date}`), el('div', 'dim', `${goal.text}, in today's system.`));
+    daily.append(row(d.cur.done ? 'DONE' : 'PROGRESS', `${d.cur.charted} worlds · ${Math.round(d.cur.t)} s · ${Math.round(d.cur.fuel)} fuel · ${d.cur.slings} slingshots`));
+    if (d.best !== null) daily.append(row('BEST', `${d.best} ${goal.unit}${d.style ? ` (${PERSONALITIES[d.style]?.name})` : ''}`));
+    const dr = el('div', 'btnrow');
+    dr.append(button("GO TO TODAY'S SYSTEM", actions.daily), button('COPY RESULT', actions.shareDaily, d.best === null && !d.cur.done));
+    daily.append(dr);
+    body.append(daily);
+    // the Signal
+    const st = state.story;
+    if (st.stage > 0) {
+      const sig = el('div', 'card' + (st.done ? ' done' : ''));
+      sig.append(el('div', 'title', st.done ? 'THE SIGNAL: SOLVED' : `THE SIGNAL: ${Math.min(st.stage, STAGES)}/${STAGES}`));
+      sig.append(el('div', 'dim', st.done ? 'You found the derelict at the end of it.'
+        : st.target === game.here.seed ? 'The source is in this system: look for the pulsing cyan marker.' : `The last beacon pointed to ${st.targetName}. Cruise will head there on its next jump.`));
+      if (!st.done && st.target !== game.here.seed) { const r = el('div', 'btnrow'); r.append(button('FOLLOW THE SIGNAL', actions.signal)); sig.append(r); }
+      body.append(sig);
+    }
     body.append(el('h2', '', `SYSTEM ${universe.star.name.toUpperCase()}`));
     if (!state.options.missions) {
       body.append(el('p', 'dim', 'Missions are switched off (OPTIONS).'));
@@ -100,8 +124,31 @@ export function createUI({ state, game, actions }) {
     }
   }
 
+  function renderLog() {
+    body.append(el('h2', '', "CAPTAIN'S LOG"));
+    if (!state.captainLog.length) body.append(el('p', 'dim', 'Nothing yet. Go somewhere.'));
+    for (const e of state.captainLog.slice().reverse()) {
+      const c = el('div', 'card');
+      c.append(el('div', 'dim', `${new Date(e.t).toLocaleString()}${e.sys ? ` · ${e.sys}` : ''}`), el('div', '', e.text));
+      body.append(c);
+    }
+  }
+
   function renderShip() {
     body.append(el('h2', '', `CREDITS: ${state.credits}`));
+    const out = el('div', 'card');
+    out.append(el('div', 'title', `Relays: ${state.outposts.length} deployed`), el('div', 'dim', `Drop a relay into orbit round the nearest world (O). Every relay you own, in any system, pays ${OUTPOST_PAY} CR a minute, and you can dock at it.`));
+    out.append(button(`DEPLOY RELAY (${OUTPOST_COST} CR)`, actions.deploy, state.credits < OUTPOST_COST));
+    body.append(out);
+    const wing = el('div', 'card');
+    wing.append(el('div', 'title', state.wing.owned ? `Wingman: ${state.wing.name}` : 'Wingman'), el('div', 'dim', 'A second ship that flies with you and charts worlds for you, in its own style. The cinematic camera checks in on it.'));
+    if (!state.wing.owned) wing.append(button(`HIRE (${WING_COST} CR)`, actions.buyWing, state.credits < WING_COST));
+    else {
+      const wr = el('div', 'btnrow');
+      for (const [id, P] of Object.entries(PERSONALITIES)) { const b = button(P.name.toUpperCase(), () => actions.wingStyle(id)); b.classList.toggle('picked', state.wing.persona === id); wr.append(b); }
+      wing.append(wr);
+    }
+    body.append(wing);
     if (!state.options.survival) {
       body.append(el('p', 'dim', 'Survival (fuel and heat) is off, so upgrades have no effect.'));
     }
@@ -152,10 +199,22 @@ export function createUI({ state, game, actions }) {
     }
     style.append(srow, el('div', 'dim', 'The HUD keeps score for the current style: worlds charted per hour, fuel per world, slingshots taken.'));
     body.append(style);
+    const th = el('div', 'card');
+    th.append(el('div', 'title', 'Colours'), el('div', 'dim', 'AUTO lets every system pick its own palette from its star (red dwarfs run warm, hot stars icy, black holes grey). Or lock one.'));
+    const trow = el('div', 'btnrow');
+    for (const [id, label] of [['auto', 'AUTO'], ...Object.entries(THEMES).map(([k, t]) => [k, t.name.toUpperCase()])]) {
+      const b = button(label, () => actions.option('theme', id));
+      b.classList.toggle('picked', (state.options.theme ?? 'auto') === id);
+      if (THEMES[id]) { b.style.borderColor = THEMES[id].console; b.style.color = THEMES[id].console; b.style.background = (state.options.theme === id ? THEMES[id].autopilot : THEMES[id].void); }
+      trow.append(b);
+    }
+    th.append(trow);
+    body.append(th);
     toggleRow('hop', 'Cruise: jump to new systems', 'When everything here is charted (or nothing new has turned up for a while), cruise jumps to a fresh random system.');
     toggleRow('autobuy', 'Cruise: buy upgrades', 'Spend credits on the cheapest ship upgrade whenever cruise can afford one.');
     toggleRow('cruiseWarp', 'Cruise: time warp', 'Speed up long coasts between worlds (2x to 8x), dropping back to normal near anything.');
     toggleRow('cinematic', 'Cinematic camera', 'In cruise, the camera cuts between chase, fly-by, planet and system shots. Grab the stick to fly and it steps aside.');
+    toggleRow('replays', 'Instant replays', 'In cruise, slingshots, eruptions and impacts are replayed in slow motion a moment later (tap to skip; R replays the last few seconds any time).');
     toggleRow('smartcam', 'Smart camera', 'Zooms out with speed, frames the nearest world and the autopilot target, leans ahead of the ship. Scroll or pinch to set how close you like it (0 resets). Off = fixed zoom.');
     toggleRow('predict', 'Trajectory prediction', 'Your future path: the orbit around the world you are near (with periapsis and apoapsis), or the path through the system and any encounter ahead.');
     toggleRow('survival', 'Survival', 'Fuel burns when you thrust; the star corona burns it faster. Refuel by landing.');
@@ -274,7 +333,7 @@ export function createUI({ state, game, actions }) {
   function render() {
     body.replaceChildren();
     for (const b of tabsEl.querySelectorAll('.tab[data-tab]')) b.classList.toggle('on', b.dataset.tab === tab);
-    ({ missions: renderMissions, postcards: renderPostcards, galaxy: renderGalaxy, codex: renderCodex, ship: renderShip, options: renderOptions })[tab]();
+    ({ missions: renderMissions, log: renderLog, postcards: renderPostcards, galaxy: renderGalaxy, codex: renderCodex, ship: renderShip, options: renderOptions })[tab]();
   }
 
   return { toggle, toast, render, get open() { return !menu.hidden; } };

@@ -39,6 +39,7 @@ const BELT_BINS = 720;
 export const STAR_CLASSES = ['O', 'B', 'A', 'F', 'G', 'K', 'M'];
 export const STAR_COLORS = {
   O: '#6666ff', B: '#ccccff', A: '#eeeeff', F: '#ffffff', G: '#ffff66', K: '#ffcc33', M: '#ff8800',
+  N: '#d8ecff', D: '#b5523a', // pulsar (neutron star), brown dwarf
 };
 
 /**
@@ -336,7 +337,10 @@ export class Spacecraft extends Body {
       f.level = Math.max(0, f.level - Math.min(1, thrustMag) * f.burn * dt);
     }
     if (thrustMag > 0) {
-      let deltaV = MAIN_ENGINE_ACCEL * dt * Math.min(1, thrustMag);
+      // The engine always out-pulls the strongest planet or star around (by a third), so nothing but a
+      // black hole can hold the ship down; away from heavy worlds it is the usual MAIN_ENGINE_ACCEL.
+      const accel = Math.max(MAIN_ENGINE_ACCEL, 1.35 * (this.gLocal ?? 0));
+      let deltaV = accel * dt * Math.min(1, thrustMag);
       if (this.landing) {
         if (this.launchClock === 0) this.launchClock = sim.now + 1;
         if (sim.now > this.launchClock) {
@@ -419,7 +423,8 @@ export class Universe {
     this.assignOrbits();
     this.setupBeltPhysics();
     const crng = makeRng((this.randomSeed ^ 0xc0e7) >>> 0);
-    const comets = system === 'sol' ? 1 : crng() < 0.75 ? crng.int(1, 3) : 0;
+    let comets = system === 'sol' ? 1 : crng() < 0.75 ? crng.int(1, 3) : 0;
+    if (this.rare === 'young') comets += 4; // a young system is still full of icy leftovers
     this.debris.makeComets(comets, `C/${(this.star.name ?? 'Sol').split(/[ .]/)[0]}`);
   }
 
@@ -582,11 +587,13 @@ export class Universe {
     this.profile = this.makeProfile();
     for (const p of parents) p.ringMul = this.profile.ringMul;
     const remap = this.makeSystemType(parents, systemName);
+    this.makeRare();
     ship.pos = fromAngle(shipAngle, remap(shipOrbit));
 
     const pairs = this.makeBinaryPlanets(parents);
     this.planets = [...parents, ...pairs, ...this.makeMoons(parents)];
     this.belts = this.makeBelts(parents);
+    if (this.rare === 'young') this.addDebrisDisk(parents);
     ship.pos = this.outsideBelts(ship.pos);
     this.wells = [...this.stars, ...this.blackHoles.filter((b) => !this.stars.includes(b))];
     this._bodies = [...this.planets, ...this.wells];
@@ -785,6 +792,63 @@ export class Universe {
     return kinds[1][1];
   }
 
+  /**
+   * Rare systems (own random stream, so ordinary systems are unchanged): a pulsar, whose two radio
+   * beams sweep round and scorch anything they cross; a brown dwarf, too dim to warm anything; or a
+   * young system still wrapped in a dense debris disk and swarming with comets.
+   */
+  makeRare() {
+    this.rare = null;
+    if (this.systemType === 'blackhole') return;
+    const rng = makeRng((this.randomSeed ^ 0x7a7e) >>> 0);
+    const roll = rng(), s = this.star;
+    if (roll < 0.07) {
+      this.rare = 'pulsar';
+      s.cls = 'N'; s.color = STAR_COLORS.N; s.radius = 520;
+      s.pulsar = { period: rng.range(4, 9), phase: rng() * PI2, reach: 75_000 };
+      s.name = `${s.name} Pulsar`;
+    } else if (roll < 0.14) {
+      this.rare = 'dwarf';
+      s.cls = 'D'; s.color = STAR_COLORS.D; s.radius *= 0.45;
+    } else if (roll < 0.22) {
+      this.rare = 'young';
+    }
+  }
+
+  /** A pulsar beam's angle right now (there are two, opposite). */
+  beamAngle(s) { return s.pulsar.phase + (PI2 * this.now) / s.pulsar.period; }
+
+  /** Is `pos` inside a pulsar beam? Returns its strength 0..1. */
+  inBeam(pos) {
+    for (const s of this.stars) {
+      if (!s.pulsar) continue;
+      const dx = pos.x - s.pos.x, dy = pos.y - s.pos.y, d = Math.hypot(dx, dy);
+      if (d > s.pulsar.reach || d < s.radius) continue;
+      const off = Math.atan2(dy, dx) - this.beamAngle(s);
+      const k = Math.abs(Math.sin(off)); // distance from either beam (they point both ways)
+      const width = 0.035 + 300 / d;
+      if (k < width) return (1 - k / width) * (1 - d / s.pulsar.reach);
+    }
+    return 0;
+  }
+
+  /** A young system's dense debris disk in its widest gap. */
+  addDebrisDisk(parents) {
+    const rng = makeRng((this.randomSeed ^ 0xd15c) >>> 0);
+    const edges = [this.minOrbit, ...parents.map((p) => p.orbitRadius).sort((a, b) => a - b), PLANET_ORBIT_RANGE[1] + 10_000];
+    let best = null;
+    for (let i = 0; i + 1 < edges.length; i++) {
+      const gap = edges[i + 1] - edges[i];
+      if (gap > 12_000 && !this.belts.some((b) => b.radius > edges[i] && b.radius < edges[i + 1]) && (!best || gap > best[1] - best[0])) best = [edges[i], edges[i + 1]];
+    }
+    if (!best) return;
+    const radius = (best[0] + best[1]) / 2, width = Math.min((best[1] - best[0]) * 0.6, 14_000);
+    const omega = PI2 / (Math.sqrt(radius ** 3 / this.totalMass) * KEPLER_CONSTANT);
+    const disk = new Belt(radius, width, omega, rng, { spacing: 150, sizeScale: 0.8, clumpy: 0.5, peaked: true });
+    disk.label = 'debris disk';
+    this.belts.push(disk);
+  }
+
   /** Decide binary / black-hole systems and re-space planet orbits. Returns an orbit remapper. */
   makeSystemType(parents, systemName) {
     const hrng = makeRng((this.randomSeed ^ 0xb1ac4001) >>> 0);
@@ -971,7 +1035,10 @@ export class Universe {
     ship.landing = landing;
     ship.velocity = planet.velocity;
     this.landings.push(landing);
-    if (!player) return;
+    if (!player) {
+      if (ship.isWing && this.onWingLanded) this.onWingLanded(ship, planet); // your wingman charts for you
+      return;
+    }
     const first = !planet.explored;
     planet.explored = true;
     this.latestDiscovery = planet;
@@ -1051,6 +1118,7 @@ export class Universe {
     for (const s of this.ships) {
       if (s.consumed) continue;
       s.transit = false;
+      s.gLocal = 0; // the strongest pull on the ship right now (black holes excepted): the engine scales to beat it
       const frame = this.now > s.launchClock + LAUNCH_MECO ? this.frameAcceleration(s.pos) : null;
       if (frame) s.velocity = sub(s.velocity, mul(frame, dt));
       for (const body of this._bodies) {
@@ -1062,12 +1130,18 @@ export class Universe {
         } else if (this.now > s.launchClock + LAUNCH_MECO) {
           const g = (GRAVITATION * s.mass * body.mass) / (d * d);
           s.velocity = add(s.velocity, mul(fromAngle(angleOf(vector), g), dt));
+          if (!body.isBlackHole && g > s.gLocal) s.gLocal = g;
         }
       }
     }
     for (const s of this.ships) if (!s.consumed) this.atmosphere(s, dt);
     this.events?.update(dt);
     if (!ship.consumed && !ship.landing) this.scanGiants(ship, dt);
+    if (this.rare === 'pulsar' && !ship.consumed && !ship.landing) {
+      const b = this.inBeam(ship.pos);
+      ship.beam = b;
+      if (b > 0) { ship.heat = Math.min(1, ship.heat + b * 1.6 * dt); if (this.onBeam) this.onBeam(b, dt); }
+    }
     for (const e of this.entities) e.update(this, dt);
     for (const a of this.anchors) a.update(this, dt);
     for (const p of this.planets) p.update(this, dt);

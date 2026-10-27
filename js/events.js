@@ -62,7 +62,7 @@ export class WorldEvents {
     }
     if (now < this.nextDistress) return;
     this.nextDistress = now + this.rng.range(240, 480);
-    const ai = u.ships.filter((s) => s.isAI && !s.distress && !s.landing && !s.consumed && dist(s.pos, u.ship.pos) > 8000);
+    const ai = u.ships.filter((s) => s.isAI && !s.isWing && !s.distress && !s.landing && !s.consumed && dist(s.pos, u.ship.pos) > 8000);
     if (!ai.length) return;
     const s = ai[this.rng.int(0, ai.length)];
     s.distress = { since: now, until: now + 300 };

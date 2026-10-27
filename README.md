@@ -122,7 +122,40 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   captioned automatically (MENU > POSTCARDS). Cruise collects them while you are away.
 - **Galaxy map and achievements** (MENU > GALAXY): every system you have visited, joined in the order
   you flew them (tap one to jump back), and 20 achievements.
-- Ships are drawn to scale: from far out yours is a single point (the ship cam shows its heading).
+- Everything is drawn to scale: from far out ships, satellites, stations and comet nuclei are single points
+  (the ship cam shows your heading).
+- **Colour themes**: every system picks a palette from its star and seed (violet, emerald, amber, crimson,
+  ice, nebula, graphite); the space, grid, starfield and HUD all follow it. Lock one in OPTIONS.
+- **The engine always wins**: thrust scales to beat the strongest pull of any planet or star nearby (by a
+  third), so nothing but a black hole can hold the ship down, gas giants included. After a loss you wake
+  up on solid ground, never in a gas giant.
+- **Slingshots only when they help**: the autopilot only swings past a world that is roughly between it and
+  where it is going (a short detour, inside a 40 degree cone) and only when the bend it needs there is one
+  that world's pull can actually give.
+
+## Stories, building, challenges
+- **The Signal**: after a few jumps the ship picks up a faint signal. Each beacon you reach decodes the
+  coordinates of the next system (cruise follows it on its own); the last one leads to the Derelict, a
+  broken ring ship the size of a moon. Progress is in MENU > MISSIONS.
+- **Rare systems**: pulsars (two radio beams sweep round like a lighthouse and scorch anything they cross),
+  brown dwarfs (too dim to warm anything: every world is frozen) and young systems still wrapped in a dense
+  debris disk and full of comets.
+- **Captain's log**: a line in the ship's own voice for every event, flavoured by the autopilot style
+  (MENU > LOG, and in italics in the floating window).
+- **Relays** (O, or MENU > SHIP): drop a relay into orbit round the nearest world for 300 CR. Every relay
+  you own, in any system, pays a few credits a minute, and you can dock at it.
+- **Wingman** (MENU > SHIP): hire a second ship that flies with you and charts worlds for you in its own
+  style; the cinematic camera checks in on it.
+- **Daily challenge** (MENU > MISSIONS): today's system with a goal (least fuel, fastest, most slingshots),
+  your best result, and a result line to copy and share.
+- **Planned burns**: hold a burn preview for a moment and let go (or press B) and the ship flies exactly
+  that change of velocity for you. N moves it to the next periapsis or apoapsis, X cancels.
+- **Instant replays**: in cruise, slingshots, eruptions and impacts are replayed in letterboxed slow
+  motion a moment later (tap to skip). R replays the last few seconds any time.
+- **Seasons and tides**: on an eccentric orbit, ice caps shrink near the star and grow far out; ocean worlds
+  bulge toward a close moon.
+- **Music**: the score swells through slingshots, plays a chord on arrival, an eerie motif for the Signal,
+  and the pad sags and wavers when the ship is in danger.
 
 ## Autopilot styles (K, or MENU > OPTIONS)
 The autopilot has personalities: the same pilot with different dials (speed, slingshot appetite and how
@@ -151,6 +184,11 @@ charted the most, and Daredevil took twice Balanced's slingshots and the most or
   full-quality cinematic view of its own, the system name and charted progress, credits, fuel, what the
   autopilot is doing, a feed of recent events, and buttons for the next shot, warp and close. Other
   browsers fall back to a video PiP with a simple overlay.
+
+## Tests
+`npm test` runs the simulation harnesses under Node (no browser): every gas giant across 40 seeds must be
+charted and left again, and each autopilot style must chart worlds (with Efficient or Cinematic the
+thriftiest). GitHub Actions runs it on every push (`.github/workflows/test.yml`).
 
 ## Credits
 Inspired by the space Easter egg in Android. The simulation is a fresh implementation and all

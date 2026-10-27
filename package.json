@@ -1,0 +1,9 @@
+{
+  "name": "perihelion",
+  "private": true,
+  "type": "module",
+  "description": "Static browser game; package.json only exists so the simulation tests can run under Node.",
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}

@@ -20,12 +20,23 @@ export const ACHIEVEMENTS = [
   ['eruption', 'Ringside seat', 'Watch a volcano erupt up close', (c) => c.eruptionsSeen >= 1],
   ['impact', 'Witness', 'See a comet strike a world', (c) => c.cometStrikes >= 1],
   ['postcards-20', 'Scrapbook', 'Collect 20 postcards', (c) => c.postcards >= 20],
+  ['signal', 'Something out there', 'Decode a signal beacon', (c) => c.beacons >= 1],
+  ['derelict', 'First contact', 'Find the derelict at the end of the signal', (c) => c.derelicts >= 1],
+  ['pulsar', 'Lighthouse keeper', 'Visit a pulsar system', (c) => c.pulsarSystems >= 1],
+  ['dwarf', 'Long winter', 'Visit a brown dwarf system', (c) => c.dwarfSystems >= 1],
+  ['young', 'Nursery', 'Visit a young system still in its debris disk', (c) => c.youngSystems >= 1],
+  ['outpost', 'Landlord', 'Deploy a relay', (c) => c.outposts >= 1],
+  ['outpost-10', 'Network', 'Deploy 10 relays', (c) => c.outposts >= 10],
+  ['wing', 'Wingman', 'Hire a wingman', (c) => c.wing >= 1],
+  ['daily', 'Daily driver', 'Finish a daily challenge', (c) => c.dailies >= 1],
+  ['node', 'By the numbers', 'Fly a planned burn', (c) => c.nodes >= 1],
 ];
 
 export function blankCounts() {
   return {
     slingshots: 0, bestTurn: 0, scans: 0, stormScans: 0, comets: 0, rescues: 0, oreSold: 0, stationDocks: 0,
     systems: 1, blackHoleSystems: 0, binarySystems: 0, tours: 0, orbitsHeld: 0, eruptionsSeen: 0, cometStrikes: 0, postcards: 0,
+    beacons: 0, derelicts: 0, pulsarSystems: 0, dwarfSystems: 0, youngSystems: 0, outposts: 0, wing: 0, dailies: 0, nodes: 0,
   };
 }
 

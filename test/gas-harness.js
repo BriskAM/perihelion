@@ -17,7 +17,7 @@ export function runGasHarness({ seeds = 40, from = 1000, simSeconds = 300, fuel 
       ap.enabled = true;
       u.fuel.on = fuel; u.fuel.capacity = 175; u.fuel.level = 175; u.fuel.burn = 1.6;
       // start 30k out, at rest relative to the target
-      const a = Math.random() * Math.PI * 2;
+      const a = ((seed * 2654435761 + gi * 40503) % 6283) / 1000; // (deterministic start angle)
       u.ship.pos = u.ship.opos = { x: target.pos.x + Math.cos(a) * 30_000, y: target.pos.y + Math.sin(a) * 30_000 };
       u.ship.velocity = { ...target.velocity };
       // the giant is the only uncharted world, so the real target logic picks it (dip or orbit survey)

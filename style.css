@@ -1,10 +1,12 @@
 :root {
+  --line: var(--line);
   --void: #16161d;
   --console: #b7b7ff;
   --autopilot: #4c8df6;
 }
 * { box-sizing: border-box; }
 html, body {
+  transition: background-color 1s;
   margin: 0; height: 100%; overflow: hidden; background: var(--void);
   overscroll-behavior: none; -webkit-user-select: none; user-select: none;
 }
@@ -52,7 +54,7 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 }
 #rescue {
   position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
-  padding: 10px 14px; color: #ffb4a8; border-color: #ff6a55; background: rgba(22, 22, 29, 0.9);
+  padding: 10px 14px; color: #ffb4a8; border-color: #ff6a55; background: color-mix(in srgb, var(--void) 90%, transparent);
 }
 #rescue[hidden], #menu[hidden] { display: none; }
 #toasts {
@@ -61,13 +63,13 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 }
 .toast {
   font: 500 12px/14px ui-monospace, Menlo, Consolas, monospace; letter-spacing: 1px; padding: 8px 10px;
-  color: var(--console); background: rgba(22, 22, 29, 0.92); border: 1px solid var(--console);
+  color: var(--console); background: color-mix(in srgb, var(--void) 92%, transparent); border: 1px solid var(--console);
   animation: fadein 0.25s ease-out;
 }
 .toast.good { border-color: #4ade80; color: #b8f5cf; }
 @keyframes fadein { from { opacity: 0; transform: translateY(-4px); } }
 #menu {
-  position: fixed; inset: 0; background: rgba(22, 22, 29, 0.96); color: var(--console);
+  position: fixed; inset: 0; background: color-mix(in srgb, var(--void) 96%, transparent); color: var(--console);
   font: 500 12px/16px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px;
   display: flex; flex-direction: column; padding: max(10px, env(safe-area-inset-top)) 12px 12px;
 }
@@ -77,7 +79,7 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 .tab.close { margin-left: auto; }
 #menu .body { overflow-y: auto; flex: 1; max-width: 560px; width: 100%; margin: 0 auto; }
 #menu h2 { font-size: 13px; margin: 4px 0 10px; font-weight: 600; }
-.card { border: 1px solid #3c3c4f; padding: 10px; margin-bottom: 8px; }
+.card { border: 1px solid var(--line); padding: 10px; margin-bottom: 8px; }
 .card.done { opacity: 0.55; }
 .card .title { font-weight: 600; margin-bottom: 4px; }
 .dim { opacity: 0.65; margin: 4px 0; }
@@ -115,15 +117,32 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 #away {
   position: fixed; left: 50%; top: 22%; transform: translateX(-50%); padding: 14px 18px; min-width: 240px;
   font: 500 12px/18px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px; color: #b8f5cf;
-  background: rgba(22, 22, 29, 0.94); border: 1px solid #4ade80; animation: fadein 0.4s ease-out; cursor: pointer;
+  background: color-mix(in srgb, var(--void) 94%, transparent); border: 1px solid #4ade80; animation: fadein 0.4s ease-out; cursor: pointer;
 }
 #away .head { color: #e6ffe9; margin-bottom: 6px; font-weight: 600; }
 @media (max-width: 420px) { .row { gap: 4px; } #auto, #pipbtn, #cruise, #warp { padding: 6px 5px; min-width: 40px; font-size: 11px; } }
 
 /* galaxy map and postcards */
-canvas.galaxy { width: 100%; max-width: 520px; aspect-ratio: 520 / 340; border: 1px solid #3c3c4f; display: block; cursor: pointer; }
+canvas.galaxy { width: 100%; max-width: 520px; aspect-ratio: 520 / 340; border: 1px solid var(--line); display: block; cursor: pointer; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-.postcard { margin: 0; border: 1px solid #3c3c4f; cursor: zoom-in; }
+.postcard { margin: 0; border: 1px solid var(--line); cursor: zoom-in; }
 .postcard img { width: 100%; display: block; aspect-ratio: 3 / 2; object-fit: cover; }
 .postcard figcaption { font-size: 10px; line-height: 13px; padding: 4px 6px; opacity: 0.8; }
 .postcard.big { grid-column: 1 / -1; cursor: zoom-out; }
+
+/* replays: a clean frame, the letterbox is drawn on the canvas */
+body.replaying #hud, body.replaying #pip, body.replaying #menubtn, body.replaying #toasts { opacity: 0; transition: opacity 0.4s; }
+#hud, #pip, #menubtn, #toasts { transition: opacity 0.4s; }
+
+/* phones: smaller type, buttons on their own line, a smaller ship cam tucked under the menu */
+@media (max-width: 520px) {
+  #hud { font-size: 10px; line-height: 11px; letter-spacing: 0.5px; }
+  #catalog { font-size: 8px; line-height: 8px; bottom: 55%; right: 30%; }
+  .row { flex-wrap: wrap; }
+  #ship { flex: 1 1 100%; }
+  .row button { flex: 1; }
+  #pip { width: 108px; height: 108px; top: 58px; right: 8px; transform: none; }
+  #toasts { top: 48px; right: 8px; max-width: 64vw; }
+  .toast { font-size: 10px; line-height: 12px; padding: 6px 8px; }
+  #titlecard .big { font-size: 16px; letter-spacing: 3px; }
+}

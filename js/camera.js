@@ -95,6 +95,7 @@ export class Camera {
     if (ap?.via && moving) options.push(['flyby', 4]);
     if (!ship.landing && base.dSurf > 9000) options.push(['system', 0.7]);
     if (ship.landing) options.push(['low', 3]);
+    if (u.wing && !u.wing.consumed) options.push(['wing', 1.2]);
     for (const o of options) o[1] *= this.style?.shots?.[o[0]] ?? 1; // the personality's taste in shots
     const total = options.reduce((s, o) => s + o[1], 0);
     let x = r * total, name = 'chase';
@@ -126,7 +127,10 @@ export class Camera {
         this.shotUntil = this.t + this.shot.dur;
       }
       const s = this.shot, ship = u.ship, minDim = Math.min(w, h);
-      if (s.name === 'chase') want = { zoom: Math.max(base.zoom, base.zSpeed) * 1.5, ox: base.ox * 0.35, oy: base.oy * 0.35, omega: 1.6 };
+      if (s.name === 'wing' && u.wing) { // check in on the wingman
+        const wg = u.wing, wd = Math.hypot(wg.pos.x - ship.pos.x, wg.pos.y - ship.pos.y);
+        want = { zoom: Math.min(1.2, (0.4 * minDim) / (Math.hypot(wg.velocity.x, wg.velocity.y) * 2.2 + 300)), ox: wg.pos.x - ship.pos.x, oy: wg.pos.y - ship.pos.y, omega: wd > 30_000 ? 0.8 : 1.4 };
+      } else if (s.name === 'chase') want = { zoom: Math.max(base.zoom, base.zSpeed) * 1.5, ox: base.ox * 0.35, oy: base.oy * 0.35, omega: 1.6 };
       else if (s.name === 'wide') want = { zoom: base.zoom * 0.3, ox: base.ox * 2, oy: base.oy * 2, omega: 1.1 };
       else if (s.name === 'low') want = { zoom: base.zoom * 0.55, ox: base.ox, oy: base.oy, omega: 1 };
       else if (s.name === 'flyby') {

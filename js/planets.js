@@ -37,7 +37,7 @@ export function heatSafeSpeed(rho) {
   return rho <= 1e-6 ? Infinity : Math.cbrt(HEAT_SAFE / (HEAT_COEFF * rho));
 }
 
-const LUMINOSITY = { O: 3, B: 2.2, A: 1.6, F: 1.25, G: 1, K: 0.72, M: 0.45, X: 0.12 };
+const LUMINOSITY = { O: 3, B: 2.2, A: 1.6, F: 1.25, G: 1, K: 0.72, M: 0.45, X: 0.12, N: 0.35, D: 0.1 };
 
 /**
  * Colour worlds by how much starlight they get: molten and rust-red close in, blue-green where water

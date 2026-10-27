@@ -16,6 +16,7 @@ export const COLORS = {
   track: '#3fb56a',
   flag: '#b8f23a',
   rock: '#8f8fae',
+  star: '200,205,255', // background stars (r,g,b); themes.js repaints all of these per system
 };
 
 const STAR_POINTS = 37;
@@ -70,8 +71,22 @@ function lightFor(u, p) {
   return bh ? { x: bh.pos.x, y: bh.pos.y, k: 0.7 } : null;
 }
 
+// Seasons: how much more (or less) light a world gets than at its average distance, 1 = average.
+export function seasonOf(p) {
+  let top = p;
+  while (top.parent && !top.parent.isAnchor) top = top.parent;
+  if (top.parent?.isAnchor) top = top.parent;
+  const c = top.orbitCenter, r = Math.hypot(top.pos.x - c.x, top.pos.y - c.y);
+  return r > 0 && top.orbitRadius ? (top.orbitRadius / r) ** 2 : 1;
+}
+
 function drawPlanet(ctx, view, p, u, px) {
   const drawColor = p.explored ? p.color : COLORS.unexplored;
+  p.season = seasonOf(p);
+  if (p.tideMoon === undefined) { // a big, close moon raises tides (shown on ocean worlds)
+    const m = u.planets.filter((q) => q.parent === p && q.orbitRadius < p.radius * 5).sort((a, b) => b.mass - a.mass)[0];
+    p.tideMoon = m ?? null;
+  }
   ctx.strokeStyle = COLORS.orbit;
   ctx.lineWidth = px;
   ctx.beginPath();
@@ -87,8 +102,33 @@ function drawPlanet(ctx, view, p, u, px) {
   drawPlanetBody(ctx, p, view, px, showTex, drawColor, COLORS.void, u.now, view.lite ? null : lightFor(u, p), p.explored);
 }
 
-function drawStar(ctx, view, star, now, px) {
+// pulsar: a tiny white-hot core and two long beams sweeping round like a lighthouse
+function drawPulsarBeams(ctx, view, u, star, px) {
+  if (view.lite) return;
+  const a = u.beamAngle(star), R = star.pulsar.reach, { x, y } = star.pos;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const dir of [0, Math.PI]) {
+    const ang = a + dir;
+    const g = ctx.createLinearGradient(x, y, x + Math.cos(ang) * R, y + Math.sin(ang) * R);
+    g.addColorStop(0, 'rgba(190,225,255,0.55)'); g.addColorStop(0.4, 'rgba(160,200,255,0.18)'); g.addColorStop(1, 'rgba(160,200,255,0)');
+    ctx.fillStyle = g;
+    const w = 0.035;
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(ang - w) * R, y + Math.sin(ang - w) * R);
+    ctx.lineTo(x + Math.cos(ang + w) * R, y + Math.sin(ang + w) * R);
+    ctx.closePath(); ctx.fill();
+  }
+  const glow = ctx.createRadialGradient(x, y, 0, x, y, star.radius * 6);
+  glow.addColorStop(0, 'rgba(220,240,255,0.6)'); glow.addColorStop(1, 'rgba(220,240,255,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, y, star.radius * 6, 0, PI2); ctx.fill();
+  ctx.restore();
+  void px;
+}
+
+function drawStar(ctx, view, star, now, px, u = null) {
   const { x, y } = star.pos;
+  if (star.pulsar && u) drawPulsarBeams(ctx, view, u, star, px);
   gravitationalField(ctx, view, star, now, px);
   if (!inView(view, x, y, star.radius + 300)) return;
   ctx.fillStyle = star.color;
@@ -306,14 +346,19 @@ function drawDebris(ctx, u, view, px) {
         ctx.fillStyle = c;
         ctx.beginPath(); ctx.arc(x, y, cr, 0, PI2); ctx.fill();
       }
-      ctx.save();
-      ctx.translate(x, y); ctx.rotate(it.rot);
-      const s = Math.max(it.size, 3 * px);
-      ctx.scale(s, s);
-      ctx.fillStyle = COLORS.void; ctx.fill(shapes[it.shape]);
-      ctx.strokeStyle = `hsl(${it.hue},60%,85%)`; ctx.lineWidth = (1.6 * px) / s; ctx.stroke(shapes[it.shape]);
-      ctx.restore();
-      if (!view.lite && view.zoom > 0.008) {
+      if (it.size / px < 1.6) { // the nucleus is too small to see: a point (the tail still shows)
+        ctx.fillStyle = `hsl(${it.hue},60%,85%)`;
+        ctx.beginPath(); ctx.arc(x, y, 1.1 * px, 0, PI2); ctx.fill();
+      } else {
+        ctx.save();
+        ctx.translate(x, y); ctx.rotate(it.rot);
+        const s = it.size;
+        ctx.scale(s, s);
+        ctx.fillStyle = COLORS.void; ctx.fill(shapes[it.shape]);
+        ctx.strokeStyle = `hsl(${it.hue},60%,85%)`; ctx.lineWidth = (1.6 * px) / s; ctx.stroke(shapes[it.shape]);
+        ctx.restore();
+      }
+      if (!view.lite && view.zoom > 0.03) {
         ctx.save(); ctx.translate(x, y); ctx.scale(px, px);
         ctx.fillStyle = `hsla(${it.hue},70%,85%,0.75)`; ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center';
         ctx.fillText(`COMET ${it.name}`, 0, -Math.max(16, it.size * view.zoom + 10));
@@ -405,6 +450,49 @@ function drawPrediction(ctx, pred, px) {
   if (pred.impact) cross(ctx, pred.impact.x, pred.impact.y, px, '#ff6a55');
 }
 
+// the Signal: a pulsing beacon, or (at the end) the derelict, a broken ring ship the size of a moon
+function drawBeacon(ctx, view, b, now, px) {
+  const { x, y } = b.pos;
+  ctx.save();
+  if (b.kind === 'derelict') {
+    if (inView(view, x, y, b.radius * 1.4)) {
+      ctx.translate(x, y); ctx.rotate(b.spin);
+      ctx.strokeStyle = '#8fa3b8'; ctx.lineWidth = 3 * px;
+      for (let k = 0; k < 7; k++) { // the ring, in broken sections
+        const a0 = (k / 7) * PI2 + 0.08, a1 = ((k + 1) / 7) * PI2 - (k === 3 ? 0.5 : 0.08);
+        ctx.beginPath(); ctx.arc(0, 0, b.radius, a0, a1); ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, 0, b.radius * 0.86, a0, a1); ctx.stroke();
+      }
+      ctx.lineWidth = 1.5 * px;
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) { const a = (k / 6) * PI2; ctx.moveTo(Math.cos(a) * b.radius * 0.18, Math.sin(a) * b.radius * 0.18); ctx.lineTo(Math.cos(a) * b.radius * 0.86, Math.sin(a) * b.radius * 0.86); }
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, b.radius * 0.18, 0, PI2); ctx.stroke();
+      ctx.fillStyle = '#7fe3ff'; // a few lights still on
+      for (let k = 0; k < 9; k++) {
+        if ((Math.floor(now * 0.7) + k * 3) % 5 === 0) continue;
+        const a = k * 0.7; ctx.globalAlpha = 0.7;
+        ctx.beginPath(); ctx.arc(Math.cos(a) * b.radius * 0.93, Math.sin(a) * b.radius * 0.93, 3 * px, 0, PI2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.rotate(-b.spin); ctx.translate(-x, -y);
+    }
+  } else {
+    ctx.strokeStyle = '#7fe3ff'; ctx.lineWidth = 1.6 * px;
+    ctx.beginPath(); ctx.moveTo(x, y - b.radius); ctx.lineTo(x + b.radius, y); ctx.lineTo(x, y + b.radius); ctx.lineTo(x - b.radius, y); ctx.closePath(); ctx.stroke();
+  }
+  // a pulse you can see from anywhere
+  for (let i = 0; i < 2; i++) {
+    const k = ((now * 0.5 + i * 0.5) % 1);
+    ctx.strokeStyle = `rgba(127,227,255,${0.8 * (1 - k)})`; ctx.lineWidth = 2 * px;
+    ctx.beginPath(); ctx.arc(x, y, Math.max(b.radius * (1 + k), (10 + 50 * k) * px), 0, PI2); ctx.stroke();
+  }
+  ctx.translate(x, y); ctx.scale(px, px);
+  ctx.fillStyle = '#9fefff'; ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center';
+  ctx.fillText(b.name.toUpperCase(), 0, -Math.max(70, b.radius / px + 14));
+  ctx.restore();
+}
+
 // burn preview: where you would go after the burn the stick is pointing at (dashed, orange)
 function drawGhost(ctx, g, px) {
   const pts = g.soi ? g.orbit.pts.map((q) => ({ x: q.x + g.soi.pos.x, y: q.y + g.soi.pos.y })) : g.pts;
@@ -416,6 +504,12 @@ function drawGhost(ctx, g, px) {
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
   ctx.stroke();
   ctx.setLineDash([]);
+  if (g.node) { // the planned burn's position
+    ctx.strokeStyle = 'rgba(255,190,110,0.95)'; ctx.lineWidth = 2 * px;
+    const s = 7 * px;
+    ctx.beginPath(); ctx.moveTo(g.node.x, g.node.y - s); ctx.lineTo(g.node.x + s, g.node.y); ctx.lineTo(g.node.x, g.node.y + s); ctx.lineTo(g.node.x - s, g.node.y); ctx.closePath(); ctx.stroke();
+    label(ctx, g.node.x, g.node.y, px, 'BURN', 'rgba(255,190,110,0.95)', -14);
+  }
   if (g.soi) {
     const o = g.orbit, R = o.body.radius;
     label(ctx, g.soi.pos.x + o.peAt.x, g.soi.pos.y + o.peAt.y, px, o.end === 'impact' ? 'IMPACT' : `Pe ${fmtD(o.pe - R)}`, 'rgba(255,190,110,0.95)', 14);
@@ -465,7 +559,7 @@ function drawStarfield(ctx, cam, w, h, dpr) {
     const ql = Math.hypot(qx, qy);
     if (ql > 70) { qx *= 70 / ql; qy *= 70 / ql; }
     const streaky = ql > 1.2;
-    ctx.strokeStyle = `rgba(200,205,255,${L.a})`; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = L.size;
+    ctx.strokeStyle = `rgba(${COLORS.star},${L.a})`; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = L.size;
     ctx.beginPath();
     const tx0 = Math.floor(ox / TILE), ty0 = Math.floor(oy / TILE);
     for (let tx = tx0; tx * TILE < ox + w; tx++) {
@@ -545,7 +639,18 @@ const SAT_COLORS = { orbiter: '#8fc4ff', geostationary: '#ff9ad0', probe: '#a6f0
 // a trading station: a slowly turning ring with spokes and docking lights, visible from far out
 function drawStation(ctx, sat, view, px, now) {
   const { x, y } = sat.pos;
-  const R = Math.max(sat.radius, 5 * px);
+  const R = sat.radius;
+  if (R / px < 1.6) { // a point of light from far out (its name still shows, so you can find it)
+    ctx.fillStyle = SAT_COLORS.station;
+    ctx.beginPath(); ctx.arc(x, y, 1.1 * px, 0, PI2); ctx.fill();
+    if (!view.lite && view.zoom > 0.02) {
+      ctx.save(); ctx.translate(x, y); ctx.scale(px, px);
+      ctx.fillStyle = SAT_COLORS.station; ctx.globalAlpha = 0.6; ctx.font = '9px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center';
+      ctx.fillText('STATION', 0, -8);
+      ctx.restore();
+    }
+    return;
+  }
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(sat.angle);
@@ -577,7 +682,7 @@ function drawSatellites(ctx, u, view, px) {
     const { x, y } = sat.pos;
     if (sat.isStation) { if (inView(view, x, y, 400)) drawStation(ctx, sat, view, px, u.now); continue; }
     if (sat.parent && view.zoom > 0.2 && !view.lite) { // faint orbit track
-      ctx.strokeStyle = SAT_COLORS[sat.kind];
+      ctx.strokeStyle = sat.own ? '#4ade80' : SAT_COLORS[sat.kind];
       ctx.globalAlpha = 0.14;
       ctx.lineWidth = px;
       ctx.beginPath();
@@ -585,11 +690,18 @@ function drawSatellites(ctx, u, view, px) {
       ctx.globalAlpha = 1;
     }
     if (!inView(view, x, y, 60)) continue;
-    const s = Math.max(sat.radius, 4 * px);
+    if (sat.radius / px < 1.6) { // true scale: from far out a satellite is just a point
+      ctx.fillStyle = sat.own ? '#4ade80' : SAT_COLORS[sat.kind];
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath(); ctx.arc(x, y, 0.9 * px, 0, PI2); ctx.fill();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    const s = sat.radius;
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(sat.kind === 'probe' ? angleOf(sat.velocity) : sat.angle);
-    ctx.strokeStyle = SAT_COLORS[sat.kind];
+    ctx.strokeStyle = sat.own ? '#4ade80' : SAT_COLORS[sat.kind];
     ctx.lineWidth = 1.4 * px;
     ctx.beginPath(); // body and two solar panels
     ctx.rect(-s * 0.35, -s * 0.35, s * 0.7, s * 0.7);
@@ -863,7 +975,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false, extra = {})
   for (const belt of u.belts) drawBelt(ctx, view, belt, u.now, px);
   for (const wl of u.wells) {
     if (wl.isBlackHole) drawBlackHole(ctx, view, wl, u.now, px);
-    else drawStar(ctx, view, wl, u.now, px);
+    else drawStar(ctx, view, wl, u.now, px, u);
   }
   drawSatellites(ctx, u, view, px);
   drawDebris(ctx, u, view, px);
@@ -871,6 +983,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false, extra = {})
   for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
   if (extra.pred) drawPrediction(ctx, extra.pred, px);
   if (extra.ghost) drawGhost(ctx, extra.ghost, px);
+  if (u.beacon) drawBeacon(ctx, view, u.beacon, u.now, px);
   if (!lite && u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
   const fancy = u.style.fancy;
   for (const sh of u.ships) if (sh !== u.ship) drawSpacecraft(ctx, u, sh, view, px, fancy);

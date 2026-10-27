@@ -3,7 +3,8 @@ import {
 } from './maths.js';
 import { Universe, STAR_CLASSES, landingSpeedLimit, SOL_SEED, Spark } from './universe.js';
 import { Autopilot } from './autopilot.js';
-import { renderUniverse, drawStick } from './render.js';
+import { renderUniverse, drawStick, COLORS } from './render.js';
+import { themeFor, applyTheme, THEMES } from './themes.js';
 import {
   loadSave, writeSave, resetSave, shipStats, UPGRADES, MAX_UPGRADE, MILESTONES,
 } from './save.js';
@@ -17,6 +18,13 @@ import { WorldEvents, HULL } from './events.js';
 import { takePostcard, loadPostcards } from './postcards.js';
 import { checkAchievements, ACHIEVEMENTS } from './achievements.js';
 import { persona, PERSONALITIES, PERSONALITY_IDS } from './personalities.js';
+import { STAGES, nextSignalSeed, systemName, placeBeacon, updateBeacon, reachedBeacon } from './story.js';
+import { captainsLine } from './captainlog.js';
+import { deployOutpost, rebuildOutposts, outpostIncome, spawnWing, WING_COST, dailyTick, dailyActive, dailyState, dailyShareText } from './outposts.js';
+import { Maneuver } from './maneuver.js';
+import { Replay } from './replay.js';
+import { createPip } from './pip.js';
+import { createHud, cap } from './hud.js';
 
 const STICK_MIN = 50, STICK_MAX = 100;
 const MANUAL_TURN = 9; // rad/s: the hull swings round quickly, but you see it turn
@@ -53,10 +61,25 @@ const game = {
 
 // log of things that happened (shown in the floating window and the "while you were away" card)
 const log = [];
-function logEvent(text) {
-  log.push({ text, t: performance.now() });
+function logEvent(text, voice = false) {
+  log.push({ text, t: performance.now(), voice });
   if (log.length > 40) log.shift();
 }
+/** The captain says something about it (in the style of the current autopilot personality). */
+function say(kind, data = {}) {
+  const line = captainsLine(kind, { star: universe?.star.name, ...data }, state.options.persona);
+  if (!line) return;
+  logEvent(line, true);
+  state.captainLog.push({ t: Date.now(), text: line, sys: universe?.star.name });
+  if (state.captainLog.length > 80) state.captainLog.shift();
+}
+const maneuver = new Maneuver();
+const replay = new Replay();
+// what the feature modules (story, outposts, wingman, daily) can reach
+const G = {
+  get u() { return universe; }, get ap() { return autopilot; }, get seed() { return seed; }, get system() { return system; }, get seedKey() { return seedKey; },
+  state, get ui() { return ui; }, sound, log: (t) => logEvent(t), say: (k, d) => say(k, d), persist: () => persist(),
+};
 
 let dirty = false;
 const persist = () => { writeSave(state); dirty = false; };
@@ -66,10 +89,27 @@ const ui = createUI({
   actions: {
     buy(id) { buyUpgrade(id); ui.render(); },
     option(key, value) {
-      state.options[key] = value; applyShip(); persist(); ui.render();
+      state.options[key] = value; applyShip(); if (key === 'theme') setTheme(); persist(); ui.render();
     },
     cruise(on) { setCruise(on); ui.render(); },
     persona(id) { setPersona(id); ui.render(); },
+    deploy() { const m = deployOutpost(G); if (m) ui.toast(m); persist(); ui.render(); },
+    buyWing() {
+      if (state.wing.owned || state.credits < WING_COST) return;
+      state.credits -= WING_COST; state.wing.owned = true; state.counts.wing++;
+      spawnWing(G); ui.toast(`WINGMAN ${state.wing.name.toUpperCase()} JOINS YOU`, 'good'); persist(); ui.render();
+    },
+    wingStyle(id) {
+      state.wing.persona = id;
+      if (universe.wing) { universe.wing.autopilot.persona = persona(id); universe.wing.autopilot.pace = persona(id).pace; }
+      persist(); ui.render();
+    },
+    signal() { if (state.story.target && state.story.target !== seed) { jumpTo(state.story.target); ui.toggle(false); } },
+    daily() { jumpTo(dailySeed()); ui.toggle(false); },
+    shareDaily() {
+      const t = dailyShareText(state);
+      navigator.clipboard?.writeText(t).then(() => ui.toast('Result copied')).catch(() => ui.toast(t));
+    },
     share() {
       const url = `${location.origin}${location.pathname}${system ? '?system=sol' : `?seed=${seed}`}`;
       if (navigator.share) navigator.share({ title: 'Perihelion', url }).catch(() => {});
@@ -129,6 +169,10 @@ function buildSystem(newSeed, newSystem) {
   autopilot.onEvent = (e) => {
     if (e.kind === 'assist' || e.kind === 'scan') {
       state.counts.slingshots++; score.slings++;
+      if (dailyActive(G)) dailyState(state).cur.slings++;
+      sound.swell();
+      say(e.kind === 'scan' ? 'scan' : 'slingshot', { name: e.body.name, turn: Math.round(e.turn), pe: Math.round(e.pe), gain: Math.round(e.gain) });
+      queueReplay(14, e.body, `${e.kind === 'scan' ? 'SCAN PASS' : 'SLINGSHOT'}: ${e.body.name.toUpperCase()}`);
       state.counts.bestTurn = Math.max(state.counts.bestTurn, Math.round(e.turn));
       postcard({ focus: universe.ship.pos, other: e.body, caption: `${e.kind === 'scan' ? 'Scan pass' : 'Slingshot'} round ${e.body.name}`, sub: `turned ${Math.round(e.turn)}°, closest ${Math.round(e.pe)} above the surface` });
     }
@@ -147,7 +191,7 @@ function buildSystem(newSeed, newSystem) {
       logEvent(`Scan pass over ${e.body.name}: +${bonus} CR`);
       persist();
     } else if (e.kind === 'tour') {
-      state.counts.tours++;
+      state.counts.tours++; say('tour', { name: e.body.name });
       logEvent(`Orbit tour of ${e.body.name}`);
     }
   };
@@ -181,11 +225,72 @@ function buildSystem(newSeed, newSystem) {
   if (soundStarted) sound.setPad(universe.star.cls, !!universe.star.isBlackHole);
   cam.snap(universe, w, h); pipCam.snap(universe, 340, 340);
   window.__universe = universe;
+  replay.clear(); maneuver.cancel();
+  setTheme();
+  rebuildOutposts(G);
+  spawnWing(G);
+  universe.onWingLanded = (ws, planet) => {
+    if (planet.explored) return;
+    planet.explored = true;
+    universe.onLanded(planet, { first: true, wing: true });
+    say('wing', { name: planet.name });
+  };
+  universe.onBeam = (b, dt) => {
+    damageHull(b * 30 * dt, 'beam');
+    if (performance.now() - (beamToast ?? 0) > 6000) { beamToast = performance.now(); ui.toast('!! PULSAR BEAM !!', 'bad'); sound.alarm(); say('beam'); }
+  };
+  if (universe.rare === 'pulsar') state.counts.pulsarSystems++;
+  if (universe.rare === 'dwarf') state.counts.dwarfSystems++;
+  if (universe.rare === 'young') state.counts.youngSystems++;
+  startSignal();
+}
+let beamToast = 0;
+
+// ---- colour themes: each system has its own (or one you lock in OPTIONS) ----
+let themeId = 'violet';
+function setTheme() {
+  themeId = state.options.theme === 'auto' || !THEMES[state.options.theme] ? themeFor(universe) : state.options.theme;
+  applyTheme(themeId, COLORS);
+}
+
+// ---- the Signal: a thread across systems ----
+function startSignal() {
+  const st = state.story;
+  if (!st.target && !st.done && state.galaxy.length >= 3 && !system) { // it begins after a few jumps
+    st.stage = 1; st.target = seed; st.targetName = universe.star.name;
+    setTimeout(() => { ui.toast('FAINT SIGNAL DETECTED. It is coming from somewhere in this system.', 'good'); sound.eerie(); say('signal'); }, 6000);
+  }
+  placeBeacon(universe, st);
+  if (universe.beacon && st.stage > 1) setTimeout(() => { ui.toast(universe.beacon.kind === 'derelict' ? 'THE SIGNAL ENDS HERE. Something huge in the outer dark.' : 'THE SIGNAL IS STRONGEST HERE.', 'good'); sound.eerie(); }, 6000);
+}
+function signalTick() {
+  const b = universe.beacon, st = state.story;
+  if (!b) return;
+  updateBeacon(universe, b);
+  if (!reachedBeacon(universe, b)) return;
+  universe.beacon = null;
+  if (autopilot.target?.src === b) autopilot.leave(autopilot.target);
+  if (b.kind === 'derelict') {
+    st.done = true; st.target = null;
+    state.credits += 1000; state.counts.derelicts++;
+    ui.toast('YOU FOUND THE DERELICT. +1000 CR', 'good'); sound.arrive(); say('derelict');
+    postcard({ focus: universe.ship.pos, other: b, caption: 'The Derelict', sub: universe.star.name, force: true });
+  } else {
+    state.counts.beacons++;
+    st.stage++;
+    st.target = nextSignalSeed(seed, st.stage);
+    st.targetName = systemName(st.target);
+    state.credits += 100 * st.stage;
+    ui.toast(`BEACON DECODED: +${100 * st.stage} CR. The coordinates point to ${st.targetName.toUpperCase()}${st.stage >= STAGES ? ' (the source)' : ''}.`, 'good');
+    sound.eerie(); say('signal');
+    postcard({ focus: universe.ship.pos, other: b, caption: 'Signal beacon decoded', sub: `next: ${st.targetName}`, force: true });
+  }
+  persist();
 }
 
 // ---- events from the simulation ----
 function wire(u) {
-  u.onLanded = (planet, { rescue, first, survey }) => {
+  u.onLanded = (planet, { rescue, first, survey, wing }) => {
     if (first && !rescue) sound.discover(planet.name); else if (!rescue) sound.touchdown();
     if (!rescue) cam.addTrauma(first ? 0.25 : 0.12);
     if (!first || rescue) return;
@@ -205,6 +310,8 @@ function wire(u) {
     state.credits += 50;
     lastDiscovery = u.now;
     away.charted++; score.charted++;
+    if (dailyActive(G)) dailyState(state).cur.charted++;
+    if (!wing) say('charted', { name: planet.name });
     ui.toast(`${survey ? 'SURVEYED' : 'DISCOVERED'} ${planet.name.toUpperCase()}  +50 CR`);
     logEvent(`${survey ? 'Surveyed' : 'Charted'} ${planet.name}`);
     for (const [count, title] of MILESTONES) {
@@ -269,7 +376,7 @@ function wire(u) {
     if (item.kind === 'comet') {
       ui.toast(`COMET ${item.name} HIT ${body.name.toUpperCase()}`, 'bad');
       logEvent(`Comet ${item.name} struck ${body.name}`);
-      if (d < 60_000) { state.counts.cometStrikes++; postcard({ focus: at, other: body, caption: `Comet ${item.name} strikes ${body.name}`, sub: universe.star.name, force: true }); }
+      if (d < 60_000) { state.counts.cometStrikes++; say('strike', { name: body.name }); queueReplay(8, { pos: at }, `IMPACT: ${body.name.toUpperCase()}`); postcard({ focus: at, other: body, caption: `Comet ${item.name} strikes ${body.name}`, sub: universe.star.name, force: true }); }
     }
   };
 }
@@ -296,7 +403,7 @@ function postcard(opts) {
   lastCard = now;
   try { takePostcard(universe, opts); } catch (e) { console.warn('postcard failed', e); return; }
   state.counts.postcards++; newCards++;
-  flashPip();
+  pip.flashPip();
 }
 
 // ---- errands for the autopilot: rescues, station visits, comet meetings ----
@@ -307,7 +414,7 @@ function rendezvous(src, kind) {
   w = {
     isRendezvous: true, kind, src, mass: 0, explored: true,
     name: kind === 'comet' ? `COMET ${src.name}` : src.name,
-    radius: kind === 'station' ? 26 : kind === 'comet' ? src.size : 12,
+    radius: kind === 'station' ? 26 : kind === 'comet' ? src.size : kind === 'derelict' || kind === 'beacon' ? src.radius : 12,
     get pos() { return src.pos; }, get velocity() { return src.velocity ?? src.vel; },
   };
   wrappers.set(src, w);
@@ -320,6 +427,7 @@ function serviceTarget() {
   const near = (list, max) => list.filter((x) => dist(x.pos, ship.pos) < max).sort((a, b) => dist(a.pos, ship.pos) - dist(b.pos, ship.pos))[0];
   const sos = near(u.ships.filter((s) => s.distress && !inGiantAir(u, s.pos)), 70_000);
   if (sos) return rendezvous(sos, 'distress');
+  if (u.beacon) return rendezvous(u.beacon, u.beacon.kind);
   const max = shipStats(state).cargoMax;
   const needs = state.hull < 45 || state.cargo >= max * 0.8 || (f.on && f.level < 0.3 * f.capacity);
   const st = needs ? near(u.stations ?? [], 90_000) : null;
@@ -344,7 +452,8 @@ function onWorldEvent(e) {
     if (d < 25_000) {
       ui.toast(`ERUPTION ON ${e.body.name.toUpperCase()}`, 'bad');
       cam.addTrauma(clamp(0.4 * (1 - d / 25_000), 0, 0.4));
-      state.counts.eruptionsSeen++;
+      state.counts.eruptionsSeen++; say('eruption', { name: e.body.name });
+      queueReplay(8, { pos: e.at }, `ERUPTION: ${e.body.name.toUpperCase()}`);
       postcard({ focus: e.at, other: e.body, caption: `Eruption on ${e.body.name}`, sub: u.star.name });
       logEvent(`Eruption on ${e.body.name}`);
     }
@@ -353,7 +462,7 @@ function onWorldEvent(e) {
     logEvent(`Mayday from ${e.ship.name}`);
     sound.lockTick(0.2);
   } else if (e.kind === 'rescued') {
-    state.credits += 150; state.counts.rescues++;
+    state.credits += 150; state.counts.rescues++; say('rescue', { ship: e.ship.name, cr: 150 });
     ui.toast(`RESCUED ${e.ship.name.toUpperCase()}  +150 CR`, 'good'); sound.fanfare();
     logEvent(`Rescued ${e.ship.name}`);
     postcard({ focus: ship.pos, other: e.ship, caption: `Rescued ${e.ship.name}`, sub: u.star.name, force: true });
@@ -369,7 +478,7 @@ function onWorldEvent(e) {
 const nearShips = new Set();
 function checkContacts() {
   for (const s of universe.ships) {
-    if (!s.isAI) continue;
+    if (!s.isAI || s.isWing) continue;
     const d = dist(s.pos, universe.ship.pos);
     if (d < 3500 && !nearShips.has(s)) {
       nearShips.add(s);
@@ -414,11 +523,20 @@ rescueBtn.addEventListener('click', () => rescue(false));
 
 // the player's ship is lost (black hole or crash): wake up parked on the safest planet
 function respawnPlayer(message, farFrom) {
+  const u = universe;
   const far = (p) => (farFrom.length ? Math.min(...farFrom.map((b) => dist(b.pos, p.pos))) : 0);
-  const planet = universe.planets.filter((p) => !p.isMoon).sort((a, b) => far(b) - far(a))[0];
-  universe.ship.consumed = null;
+  // wake up on solid ground (never a gas giant: there is no ground there), clear of any giant's air
+  const solid = (list) => list.filter((p) => !p.gas && !inGiantAir(u, p.pos)).sort((a, b) => far(b) - far(a))[0];
+  const planet = solid(u.planets.filter((p) => !p.isMoon)) ?? solid(u.planets);
+  u.ship.consumed = null;
   state.credits = Math.floor(state.credits * 0.75);
-  universe.forceLand(planet, true);
+  if (planet) u.forceLand(planet, true);
+  else { // nothing solid in this system: drift on a quiet circular orbit round the star instead
+    const r = Math.max(u.minOrbit, 40_000), a = Math.random() * Math.PI * 2;
+    u.ship.landing = null;
+    u.ship.pos = u.ship.opos = fromAngle(a, r);
+    u.ship.velocity = fromAngle(a + Math.PI / 2, u.speedAt(r));
+  }
   universe.fuel.level = Math.min(universe.fuel.capacity, 20);
   universe.timeScale = 1;
   autopilot.target = null;
@@ -429,12 +547,6 @@ function respawnPlayer(message, farFrom) {
 
 const canvas = document.getElementById('space');
 const ctx = canvas.getContext('2d');
-const shipCam = document.getElementById('pip');
-const shipCamCtx = shipCam.getContext('2d');
-const SHIPCAM_SIZE = 160, SHIPCAM_ZOOM = 3.5;
-const hudTop = document.getElementById('catalog');
-const hudShip = document.getElementById('ship');
-const hudAuto = document.getElementById('autotext');
 const autoBtn = document.getElementById('auto');
 const cruiseBtn = document.getElementById('cruise');
 const warpBtn = document.getElementById('warp');
@@ -452,6 +564,7 @@ window.addEventListener('resize', resize);
 resize();
 
 // ---- start ----
+let strandedFor = 0;
 let lastDiscovery = 0, allChartedAt = 0, wanderingSince = 0; // (sim time, so warp counts properly)
 const away = { charted: 0, missions: 0, systems: 0, credits: state.credits, since: 0 };
 {
@@ -477,10 +590,11 @@ async function holdWake(on) {
   } catch { wakeLock = null; }
 }
 function setCruise(on) {
+  const was = cruiseBtn.classList.contains('on');
   state.cruise = on;
   cruiseBtn.classList.toggle('on', on);
   cam.director = on && state.options.cinematic;
-  if (on) { setAuto(true); ui.toast('CRUISE: exploring on its own. Grab the stick any time.'); logEvent('Cruise engaged'); }
+  if (on) { setAuto(true); if (!was) { ui.toast('CRUISE: exploring on its own. Grab the stick any time.'); logEvent('Cruise engaged'); } }
   else { requestedWarp = 1; cam.director = false; }
   holdWake(on);
   persist();
@@ -518,6 +632,7 @@ const pointers = new Map();
 let pinch = null;
 const pos = (e) => vec(e.clientX, e.clientY);
 canvas.addEventListener('pointerdown', (e) => {
+  if (replay.play) { replay.stop(); return; } // a tap skips the replay
   pointers.set(e.pointerId, pos(e));
   try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or already-released pointer */ }
   if (pointers.size === 2) { // second finger: pinch to zoom instead of flying
@@ -545,6 +660,8 @@ const release = (e) => {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (!stick.active || e.pointerId !== stick.id) return;
+  // let go after holding a burn preview for a moment: that burn is planned and flown for you
+  if (ghostBurn && performance.now() - ghostSince > 700) planBurn();
   stick.active = false; stick.vec = null;
   universe.ship.thrust = vec();
 };
@@ -562,13 +679,18 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'a' || e.key === 'A') { setAuto(!autopilot.enabled); if (!autopilot.enabled && state.cruise) setCruise(false); }
   if (e.key === 'c' || e.key === 'C') setCruise(!state.cruise);
   if (e.key === 'm' || e.key === 'M') ui.toggle();
-  if (e.key === 'p' || e.key === 'P') openPip();
+  if (e.key === 'p' || e.key === 'P') pip.openPip();
   if (e.key === '.' || e.key === ']') cycleWarp(1);
   if (e.key === ',' || e.key === '[') cycleWarp(-1);
   if (e.key === '=' || e.key === '+') cam.nudgeZoom(0.35);
   if (e.key === '-' || e.key === '_') cam.nudgeZoom(-0.35);
   if (e.key === '0') cam.resetZoom();
   if (e.key === 'v' || e.key === 'V') { cam.shot = null; pipCam.shot = null; } // next cinematic shot
+  if (e.key === 'b' || e.key === 'B') planBurn();
+  if (e.key === 'n' || e.key === 'N') { maneuver.cycle(universe); if (maneuver.node) ui.toast(`BURN AT: ${{ now: 'NOW', pe: 'NEXT PERIAPSIS', ap: 'NEXT APOAPSIS' }[maneuver.node.at]}`); }
+  if (e.key === 'x' || e.key === 'X') { if (maneuver.node) { maneuver.cancel(); ui.toast('BURN CANCELLED'); } }
+  if (e.key === 'r' || e.key === 'R') startReplay(12, null, '');
+  if (e.key === 'o' || e.key === 'O') { const m = deployOutpost(G); if (m) ui.toast(m); persist(); }
   if (e.key === 'k' || e.key === 'K') setPersona(PERSONALITY_IDS[(PERSONALITY_IDS.indexOf(state.options.persona) + 1) % PERSONALITY_IDS.length]);
   if (e.key === 'Escape' && ui.open) ui.toggle(false);
 });
@@ -580,7 +702,13 @@ window.addEventListener('keyup', (e) => {
 
 const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 /** Turn the player's inputs into heading and thrust. Returns true while the pilot is flying. */
-let ghostBurn = null, ghostPred = null;
+let ghostBurn = null, ghostPred = null, ghostSince = 0, lastGhost = null;
+function planBurn() {
+  const g = ghostBurn ?? lastGhost;
+  if (!g || universe.ship.landing) { ui.toast('Hold the stick inside its ring to preview a burn, then plan it'); return; }
+  maneuver.plan(universe, g.dir, g.dv);
+  ui.toast(`BURN PLANNED: ${Math.round(g.dv)} Δv. N: at periapsis/apoapsis instead, X: cancel`, 'good');
+}
 
 // ---- personalities: switch with K, and a running scoreboard to compare them ----
 const score = { t: 0, charted: 0, fuel: 0, slings: 0, lastFuel: null };
@@ -610,7 +738,10 @@ function pilot(dt) {
     const off = Math.abs(wrapA(want - ship.angle));
     const power = m < STICK_MIN ? 0 : clamp((m - STICK_MIN) / (STICK_MAX - STICK_MIN), 0, 1);
     // inside the dead zone the stick previews a burn instead: where would a push this way take you?
+    const was = ghostBurn;
     ghostBurn = m > 14 && m < STICK_MIN && !ship.landing ? { dir: want, dv: 1100 * (m / STICK_MIN) } : null;
+    if (ghostBurn && !lastGhost) ghostSince = performance.now();
+    lastGhost = ghostBurn; void was;
     ship.thrust = fromAngle(ship.angle, power * Math.max(0, Math.cos(off)) ** 2); // no shove the wrong way mid-flip
     return true;
   }
@@ -628,337 +759,64 @@ function pilot(dt) {
   return stick.active;
 }
 
-// ---- HUD ----
-const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-const pad = (n, width) => String(n).padStart(width, ' ');
-const signed = (n) => pad((n >= 0 ? '+' : '-') + Math.abs(Math.round(n)), 7);
-const fmt = (n) => (!isFinite(n) ? '∞' : Math.abs(n) >= 10_000 ? `${Math.round(n / 1000)}k` : Math.abs(n) >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n)}`);
+// ---- HUD and ship cam: see hud.js ----
+const hud = createHud({
+  get u() { return universe; }, get ap() { return autopilot; }, state, get system() { return system; }, get seed() { return seed; },
+  get pred() { return pred; }, maneuver, get requestedWarp() { return requestedWarp; }, get jump() { return jump; }, cam, scoreLine: () => scoreLine(),
+});
+const { updateHud, drawShipCam } = hud;
 
-function orbitLine() {
-  if (!pred) return null;
-  if (pred.soi) {
-    const o = pred.orbit, R = o.body.radius, name = o.body.name.toUpperCase();
-    if (o.end === 'impact') return `ORB: ${name}  ON COLLISION COURSE`;
-    if (o.end === 'escape') return `ORB: ${name}  ESCAPING  PE ${fmt(o.pe - R)}`;
-    return `ORB: ${name}  PE ${fmt(o.pe - R)}  AP ${fmt(o.ap - R)}  T ${fmt(o.period)}s${o.end === 'air' ? '  (AIR)' : ''}`;
-  }
-  if (pred.encounter) {
-    const e = pred.encounter, o = e.orbit;
-    return `ENC: ${e.body.name.toUpperCase()} in ${Math.round(e.t)}s${o ? (o.end === 'impact' ? '  IMPACT' : `  PE ${fmt(o.pe - e.body.radius)}`) : ''}`;
-  }
-  if (pred.impact) return `!! IMPACT ${pred.impact.body.name.toUpperCase()} in ${Math.round(pred.impact.t)}s !!`;
-  return null;
+// ---- floating window: see pip.js ----
+const pip = createPip({
+  get u() { return universe; }, get ap() { return autopilot; }, state, get system() { return system; }, get jump() { return jump; },
+  ui, sound, pipCam, log, get theme() { return themeId; }, tick: (ms) => tick(ms), setCruise: (on) => setCruise(on), cycleWarp: (d) => cycleWarp(d), unlockSound: () => unlockSound(),
+});
+
+// ---- instant replays ----
+const replayCam = { x: 0, y: 0, zoom: 1, starX: 0, starY: 0, streak: { x: 0, y: 0 }, sx: 0, sy: 0 };
+let lastReplay = 0;
+/** Cruise replays its best moments a couple of seconds after they happen (not too often). */
+function queueReplay(seconds, focus, title) {
+  if (!state.options.replays || !state.cruise || document.hidden || replay.play || replay.queue) return;
+  if (performance.now() - lastReplay < 50_000 || performance.now() - lastManual < 8000) return;
+  replay.queue = { at: performance.now() + 2500, seconds, focus, title };
 }
-
-function updateHud() {
-  const u = universe, ship = u.ship, star = u.star;
-  const explored = u.planets.filter((p) => p.explored);
-  const designation = system === 'sol' ? 'SOL' : `PRH-${u.randomSeed % 100_000}`;
-  const cls = u.stars.map((s) => (s.isBlackHole ? 'BH' : s.cls)).join(' + ');
-  const belts = u.belts.filter((b) => !b.trojan), trojans = u.belts.length - belts.length;
-  const comets = u.debris.items.filter((it) => it.kind === 'comet').length;
-  const lines = [
-    `  STAR: ${star.name} (${designation})`,
-    ` CLASS: ${cls}${u.systemType === 'binary' ? ' (binary)' : ''}`,
-    `RADIUS: ${u.stars.map((s) => Math.trunc(s.radius)).join(' + ')}`,
-    `  MASS: ${u.totalMass.toPrecision(3)}`,
-    ...(u.blackHoles.length && !star.isBlackHole ? [`  HOLE: ${u.blackHoles[0].name}`] : []),
-    ...(belts.length ? [` BELTS: ${belts.length}${belts.some((b) => b.gaps?.length) ? ` (${belts.reduce((s, b) => s + (b.gaps?.length ?? 0), 0)} resonance gaps)` : ''}`] : []),
-    ...(trojans ? [`TROJAN: ${trojans} swarm${trojans > 1 ? 's' : ''}`] : []),
-    ...(comets ? [`COMETS: ${comets}`] : []),
-    `BODIES: ${explored.length} / ${u.planets.length}`,
-    ...(state.cruise ? [`SYSTEMS VISITED: ${state.stats.systems + 1}`] : []),
-    '',
-  ];
-  const SHOWN = 5; // the rest live in the CODEX tab
-  for (const p of explored.slice(-SHOWN)) {
-    lines.push(`  BODY: ${p.name}`, `  TYPE: ${cap(p.description)}${p.climate ? ` (${p.climate})` : ''}`, `  ATMO: ${cap(p.atmosphere)}`,
-      ` FAUNA: ${cap(p.fauna)}`, ` FLORA: ${cap(p.flora)}`, '');
+function startReplay(seconds, focus, title) {
+  if (replay.play) { replay.stop(); return; }
+  if (!replay.start(seconds, 1, focus, title)) { ui.toast('Nothing to replay yet'); return; }
+  const p = replay.play;
+  p.speed = Math.max(0.15, (p.end - p.from) / 7); // about seven seconds of slow motion, whatever the warp was
+  p.real = 0;
+  lastReplay = performance.now();
+  Object.assign(replayCam, { x: cam.x, y: cam.y, zoom: cam.zoom, starX: cam.starX, starY: cam.starY });
+  sound.swell();
+}
+function replayFrame(dt) {
+  const p = replay.play;
+  p.t += dt * p.speed; p.real += dt;
+  if (p.t >= p.end) { replay.stop(); return; }
+  const undo = replay.apply(universe, p.t);
+  const s = universe.ship.pos, f = p.focus?.pos ?? s;
+  const span = Math.max(dist(s, f) + (p.focus?.radius ?? 0) * 2.4, 1600);
+  const k = 1 - Math.exp(-dt * 2.5), prog = (p.t - p.from) / (p.end - p.from);
+  const zoom = clamp((0.42 * Math.min(w, h)) / span * (1 + 0.35 * prog), 0.0015, 3); // a slow dolly in
+  replayCam.x += ((s.x + f.x) / 2 - replayCam.x) * k; replayCam.y += ((s.y + f.y) / 2 - replayCam.y) * k;
+  replayCam.zoom = Math.exp(Math.log(replayCam.zoom) + (Math.log(zoom) - Math.log(replayCam.zoom)) * k);
+  if (!document.hidden || forceRender) {
+    renderUniverse(ctx, universe, replayCam, w, h, dpr, false, { markers: false });
+    // letterbox, title and a progress line
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const bar = Math.round(h * 0.09);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, bar); ctx.fillRect(0, h - bar, w, bar);
+    ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(18, bar / 2, 5, 0, Math.PI * 2); if (Math.floor(p.real * 2) % 2 === 0) ctx.fill();
+    ctx.font = '600 12px ui-monospace, Menlo, monospace'; ctx.fillStyle = '#e6e6ff'; ctx.textAlign = 'left';
+    ctx.fillText(`REPLAY  ${p.title ?? ''}`, 32, bar / 2 + 4);
+    ctx.fillStyle = 'rgba(183,183,255,0.6)'; ctx.fillRect(0, h - bar, w * prog, 2);
+    ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(183,183,255,0.7)';
+    ctx.fillText('tap or R to skip', w - 12, h - bar / 2 + 4);
   }
-  if (explored.length > SHOWN) lines.push(`(+${explored.length - SHOWN} more: MENU > CODEX)`);
-  const catalog = lines.join('\n');
-  if (hudTop.textContent !== catalog) {
-    hudTop.textContent = catalog;
-    hudTop.classList.remove('small');
-    if (hudTop.scrollHeight > hudTop.clientHeight + 1) hudTop.classList.add('small');
-  }
-
-  const closest = u.closestPlanet();
-  const alt = Math.trunc(dist(closest.pos, ship.pos) - closest.radius);
-  const rel = Math.round(mag(sub(ship.velocity, closest.velocity)));
-  const safe = Math.round(landingSpeedLimit(closest));
-  const tooFast = u.style.strict && closest.collides && alt < 2500 && rel > safe;
-  const first = ship.landing
-    ? `LND: ${ship.landing.planet.name.toUpperCase()}\nJOB: ${ship.landing.text.toUpperCase()}`
-    : alt < 10_000
-      ? `ALT: ${alt}${closest.collides && u.style.strict && alt < 4000 ? `  REL: ${rel}/${safe}${tooFast ? '  !! TOO FAST !!' : ''}` : ''}`
-      : null;
-  const f = u.fuel;
-  const dv = f.on ? Math.round((f.level / Math.max(f.burn, 1e-6)) * 1000) : null; // seconds of full burn x engine
-  const fuelLine = f.on
-    ? `FUEL: ${Math.round((f.level / f.capacity) * 100)}%  ΔV ${fmt(dv)}${f.heat ? '  !! HEAT !!' : f.level <= 0 ? '  EMPTY' : ''}`
-    : null;
-  const near = u.nearestBlackHole(ship.pos);
-  const holeLine = u.tidal > 0.02
-    ? `!! TIDAL ${Math.round(u.tidal * 100)}%  TIME x${u.timeScale.toFixed(2)} !!`
-    : near && near.d < near.bh.radius * 14 ? `HOLE: ${Math.round(near.d - near.bh.radius)} TO HORIZON` : null;
-  rescueBtn.hidden = !(f.on && f.level <= 0 && !ship.landing) || state.cruise;
-  const reentry = ship.heatRate > 0.08
-    ? `REENTRY: ${Math.round(ship.heat * 100)}%  (${Math.round((ship.heatRate / 0.8) * 100)}% of the safe heating)`
-    : ship.atmoRho > 0.005 ? `AIR: ${ship.atmoRho.toFixed(2)}${ship.atmoPlanet && ship.atmoPlanet.gas ? '  (gas giant)' : ''}` : null;
-  let satLine = null, bestSat = 400;
-  for (const s of u.satellites) {
-    const d = dist(s.pos, ship.pos);
-    if (d < bestSat) {
-      bestSat = d;
-      const r = Math.round(mag(sub(ship.velocity, s.velocity)));
-      satLine = `SAT: ${s.name} ${Math.round(d)}  REL ${r}${r < 90 && d < 120 ? (s.cooldown > 0 ? '  (recharging)' : '  DOCK!') : ''}`;
-    }
-  }
-  let cometLine = null;
-  for (const c of u.debris.items) {
-    if (c.kind !== 'comet') continue;
-    const d = dist(c.pos, ship.pos);
-    if (d < 6000) cometLine = `COMET ${c.name}: ${Math.round(d)}  REL ${Math.round(mag(sub(ship.velocity, c.vel)))}${u.cometsMet.has(c.name) ? '  (met)' : ''}`;
-  }
-  const text = [
-    first,
-    orbitLine(),
-    reentry,
-    satLine,
-    cometLine,
-    holeLine,
-    fuelLine,
-    `HULL: ${Math.round(state.hull)}%${state.hull < 35 ? '  !! DAMAGED !!' : ''}   HOLD: ${state.cargo}/${shipStats(state).cargoMax}`,
-    `CR:  ${state.credits}`,
-    `THR: ${Math.round(mag(ship.thrust) * 100)}%${u.warp > 1 ? `   WARP x${u.warp}` : requestedWarp > 1 ? `   WARP x${requestedWarp} (held: too close)` : ''}`,
-    `POS: <${signed(ship.pos.x)},${signed(ship.pos.y)}>`,
-    `VEL: ${Math.round(mag(ship.velocity))}`,
-  ].filter((x) => x !== null).join('\n');
-  if (hudShip.textContent !== text) hudShip.textContent = text;
-  const at = autopilot.enabled ? `${autopilot.telemetry}\n${scoreLine()}` : '';
-  if (hudAuto.textContent !== at) hudAuto.textContent = at;
-  warpBtn.textContent = `x${u.warp > 1 ? u.warp : requestedWarp}`;
-  warpBtn.classList.toggle('on', u.warp > 1);
-}
-
-// Ship cam: a fixed close-up of the ship, with its velocity (relative to the nearest world) and thrust.
-function drawShipCam() {
-  const u = universe, ship = u.ship;
-  const overview = cam.zoom >= 0.4;
-  const show = state.options.pip && (cam.zoom < 0.4 || autopilot.enabled) && !ship.consumed && !jump;
-  shipCam.hidden = !show;
-  if (!show) return;
-  const d = Math.min(window.devicePixelRatio || 1, 2);
-  if (shipCam.width !== SHIPCAM_SIZE * d) { shipCam.width = shipCam.height = SHIPCAM_SIZE * d; }
-  const tgt = autopilot.enabled ? autopilot.target : null;
-  const span = tgt ? Math.max(1500, dist(tgt.pos, ship.pos)) : 20_000;
-  const zoomNow = overview ? clamp(62 / span, 0.0008, 0.3) : SHIPCAM_ZOOM;
-  const c2 = shipCamCtx;
-  renderUniverse(c2, u, { x: ship.pos.x, y: ship.pos.y, zoom: zoomNow }, SHIPCAM_SIZE, SHIPCAM_SIZE, d, true);
-  c2.setTransform(d, 0, 0, d, 0, 0);
-  const c = SHIPCAM_SIZE / 2, ref = u.closestPlanet();
-  c2.font = '9px ui-monospace, Menlo, monospace'; c2.textAlign = 'center';
-  if (overview) { // wide view: mark the ship and the target it is flying to
-    c2.strokeStyle = '#fff'; c2.lineWidth = 1.5;
-    c2.beginPath(); c2.arc(c, c, 4, 0, Math.PI * 2); c2.stroke();
-    if (tgt) {
-      const tx = c + (tgt.pos.x - ship.pos.x) * zoomNow, ty = c + (tgt.pos.y - ship.pos.y) * zoomNow;
-      c2.strokeStyle = '#4c8df6'; c2.setLineDash([3, 3]);
-      c2.beginPath(); c2.moveTo(c, c); c2.lineTo(tx, ty); c2.stroke(); c2.setLineDash([]);
-      c2.beginPath(); c2.arc(tx, ty, 6, 0, Math.PI * 2); c2.stroke();
-    }
-    c2.fillStyle = '#b7b7ff';
-    c2.fillText(`${autopilot.strategy}${tgt ? ' > ' + tgt.name.split(' ').pop() : ''}`, c, SHIPCAM_SIZE - 9);
-    return;
-  }
-  const rel = sub(ship.velocity, ref.velocity), speed = mag(rel);
-  const arrow = (vx, vy, len, color, width) => {
-    c2.strokeStyle = color; c2.fillStyle = color; c2.lineWidth = width;
-    const a = Math.atan2(vy, vx), x = c + Math.cos(a) * len, y = c + Math.sin(a) * len;
-    c2.beginPath(); c2.moveTo(c, c); c2.lineTo(x, y); c2.stroke();
-    c2.beginPath();
-    c2.moveTo(x, y); c2.lineTo(x - Math.cos(a - 0.45) * 7, y - Math.sin(a - 0.45) * 7);
-    c2.lineTo(x - Math.cos(a + 0.45) * 7, y - Math.sin(a + 0.45) * 7); c2.fill();
-  };
-  if (speed > 5) arrow(rel.x, rel.y, Math.min(c - 12, 14 + Math.log10(1 + speed) * 16), '#4ade80', 1.5);
-  const th = mag(ship.thrust);
-  if (th > 0) arrow(-Math.cos(ship.angle), -Math.sin(ship.angle), 10 + th * 30, '#ff8800', 2);
-  c2.fillStyle = '#b7b7ff';
-  c2.fillText(autopilot.enabled ? `${autopilot.strategy}  ${Math.round(speed)} rel ${ref.name.split(' ').pop()}` : `${Math.round(speed)} rel ${ref.name.split(' ').pop()}`, c, SHIPCAM_SIZE - 9);
-  c2.fillStyle = '#4ade80'; c2.textAlign = 'left'; c2.fillText('vel', 14, 14);
-  c2.fillStyle = '#ff8800'; c2.fillText('thrust', 14, 25);
-}
-
-// ---- floating window (picture-in-picture) --------------------------------------------------
-// A small always-on-top window with a full-quality, cinematic view: its own camera cuts between
-// shots, a strip on top shows the system and how much of it is charted, the bottom shows what the
-// autopilot is doing, and recent events scroll by. It has its own buttons (next shot, warp, close).
-// Browsers stop animation frames in hidden tabs, so a worker ticks the game while the page is hidden.
-const pipWin = { active: false, win: null, canvas: null, ctx: null, video: null, kind: null, dpr: 1, el: {} };
-let ticker = null, strandedFor = 0;
-
-function startTicker() {
-  if (ticker) return;
-  const blob = new Blob(['setInterval(() => postMessage(0), 33)'], { type: 'text/javascript' });
-  ticker = new Worker(URL.createObjectURL(blob));
-  ticker.onmessage = () => { if (document.hidden) tick(performance.now()); };
-}
-function stopTicker() { ticker?.terminate(); ticker = null; }
-const needTicker = () => pipWin.active || state.cruise;
-
-function sizePipCanvas() {
-  if (pipWin.kind !== 'document') return;
-  const win = pipWin.win;
-  pipWin.dpr = Math.min(win.devicePixelRatio || 1, 2);
-  pipWin.canvas.width = Math.round(win.innerWidth * pipWin.dpr);
-  pipWin.canvas.height = Math.round(win.innerHeight * pipWin.dpr);
-}
-
-const PIP_CSS = `
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: #16161d; overflow: hidden; color: #b7b7ff;
-    font: 500 11px/13px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px; user-select: none; }
-  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
-  .top { position: fixed; top: 0; left: 0; right: 0; padding: 7px 9px 14px;
-    background: linear-gradient(#16161dee, #16161d00); pointer-events: none; }
-  .name { color: #e6e6ff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bar { height: 3px; background: #2c2c3c; margin-top: 5px; }
-  .bar > i { display: block; height: 100%; background: #4c8df6; transition: width .6s; }
-  .meta { display: flex; justify-content: space-between; margin-top: 4px; opacity: .75; }
-  .log { position: fixed; left: 9px; bottom: 58px; right: 9px; pointer-events: none; }
-  .log div { animation: in .4s ease-out; text-shadow: 0 0 6px #16161d; }
-  @keyframes in { from { opacity: 0; transform: translateY(4px); } }
-  .bottom { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px 9px 7px;
-    background: linear-gradient(#16161d00, #16161dee); display: flex; align-items: flex-end; gap: 6px; }
-  .status { flex: 1; min-width: 0; }
-  .status .s { color: #4c8df6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .fuel { height: 3px; background: #2c2c3c; margin-top: 4px; width: 100%; }
-  .fuel > i { display: block; height: 100%; background: #4ade80; }
-  button { font: inherit; color: #b7b7ff; background: #16161dcc; border: 1px solid #b7b7ff; padding: 5px 7px; cursor: pointer; }
-  button:hover { background: #4c8df6; color: #fff; }
-  .shot { position: fixed; top: 46px; right: 9px; opacity: .5; font-size: 9px; pointer-events: none; }
-`;
-
-async function openDocumentPip(testWin = null) {
-  const win = testWin ?? await window.documentPictureInPicture.requestWindow({ width: 380, height: 380 });
-  const doc = win.document;
-  const style = doc.createElement('style'); style.textContent = PIP_CSS; doc.head.append(style);
-  doc.body.innerHTML = `<canvas></canvas>
-    <div class="top"><div class="name"></div><div class="bar"><i></i></div><div class="meta"><span class="charted"></span><span class="cr"></span></div></div>
-    <div class="shot"></div>
-    <div class="log"></div>
-    <div class="bottom"><div class="status"><div class="s"></div><div class="fuel"><i></i></div></div>
-      <button data-a="shot" title="Next camera shot">VIEW</button><button data-a="warp" title="Time warp">x1</button><button data-a="close" title="Close">×</button></div>`;
-  const q = (s) => doc.querySelector(s);
-  const canvas = q('canvas');
-  pipWin.el = { name: q('.name'), bar: q('.bar > i'), charted: q('.charted'), cr: q('.cr'), log: q('.log'), s: q('.status .s'), fuel: q('.fuel > i'), warp: q('[data-a=warp]'), shot: q('.shot') };
-  doc.body.addEventListener('click', (e) => {
-    const a = e.target.closest?.('button')?.dataset.a;
-    if (a === 'shot') pipCam.shot = null;
-    if (a === 'warp') cycleWarp(1);
-    if (a === 'close') closePip();
-  });
-  Object.assign(pipWin, { active: true, win, canvas, ctx: canvas.getContext('2d'), kind: 'document' });
-  sizePipCanvas();
-  win.addEventListener('resize', sizePipCanvas);
-  win.addEventListener('pagehide', closePip);
-}
-
-async function openVideoPip() {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 480;
-  const c2 = canvas.getContext('2d'); // a stream gives no video until the canvas has been painted once
-  c2.fillStyle = '#16161d'; c2.fillRect(0, 0, 480, 480);
-  const video = document.createElement('video');
-  video.muted = true; video.playsInline = true; video.srcObject = canvas.captureStream(30);
-  const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-  await within(video.play(), 3000);
-  await within(video.requestPictureInPicture(), 3000);
-  video.addEventListener('leavepictureinpicture', closePip);
-  Object.assign(pipWin, { active: true, canvas, ctx: canvas.getContext('2d'), video, kind: 'video', dpr: 1 });
-}
-
-async function openPip() {
-  if (pipWin.active) return closePip();
-  unlockSound();
-  if (!state.cruise) setCruise(true); // the window is for watching: cruise flies
-  const attempts = [];
-  if ('documentPictureInPicture' in window) attempts.push(openDocumentPip);
-  if (document.pictureInPictureEnabled) attempts.push(openVideoPip);
-  let lastErr = null;
-  for (const attempt of attempts) {
-    try { await attempt(); lastErr = null; break; } catch (err) { lastErr = err; console.warn('floating window failed', err); }
-  }
-  if (!pipWin.active) {
-    ui.toast(attempts.length ? `Could not open the floating window (${lastErr?.name ?? 'error'})` : 'Floating windows are not supported in this browser');
-    return;
-  }
-  pipCam.snap(universe, 380, 380);
-  startTicker();
-  ui.toast('Floating window open: cruise keeps flying');
-}
-
-function closePip() {
-  if (!pipWin.active) return;
-  const { win, video } = pipWin;
-  pipWin.active = false;
-  if (!needTicker()) stopTicker();
-  try { win?.close(); } catch { /* already gone */ }
-  if (video) { try { document.exitPictureInPicture(); } catch { /* ignore */ } video.srcObject = null; }
-  Object.assign(pipWin, { win: null, canvas: null, ctx: null, video: null, kind: null, el: {} });
-}
-document.getElementById('pipbtn').addEventListener('click', openPip);
-
-// a camera flash in the floating window when a postcard is taken
-function flashPip() {
-  sound.lockTick(1);
-  const doc = pipWin.win?.document;
-  if (!doc) return;
-  const f = doc.createElement('div');
-  f.style.cssText = 'position:fixed;inset:0;background:#fff;opacity:.55;transition:opacity .6s;pointer-events:none';
-  doc.body.append(f);
-  setTimeout(() => { f.style.opacity = '0'; }, 40);
-  setTimeout(() => f.remove(), 700);
-}
-document.getElementById('pipbtn').addEventListener('pointerdown', (e) => e.stopPropagation());
-
-let pipHudClock = 0;
-function drawFloating(frameDt) {
-  const u = universe, { ctx: c, canvas } = pipWin;
-  const d = pipWin.dpr, cw = canvas.width / d, ch = canvas.height / d;
-  pipCam.update(u, frameDt, cw, ch, autopilot, false);
-  renderUniverse(c, u, pipCam, cw, ch, d, false, { markers: false });
-  const tgt = autopilot.target;
-  const charted = u.planets.filter((p) => p.explored).length;
-  if (pipWin.kind === 'document') {
-    if ((pipHudClock += frameDt) < 0.2) return;
-    pipHudClock = 0;
-    const el = pipWin.el, now = performance.now();
-    const set = (e, v) => { if (e && e.textContent !== v) e.textContent = v; };
-    set(el.name, `${u.star.name}${system === 'sol' ? '' : `  ·  ${u.stars.map((s) => (s.isBlackHole ? 'BH' : s.cls)).join('+')}`}`);
-    el.bar.style.width = `${Math.round((charted / u.planets.length) * 100)}%`;
-    set(el.charted, `${charted}/${u.planets.length} charted${state.stats.systems ? `  ·  system ${state.stats.systems + 1}` : ''}`);
-    set(el.cr, `${state.credits} CR`);
-    set(el.s, jump ? 'JUMPING TO A NEW SYSTEM' : `${persona(state.options.persona).name.toUpperCase()} · ${autopilot.strategy}${tgt ? ' > ' + tgt.name.toUpperCase() : ''}`);
-    el.fuel.style.width = `${Math.round((u.fuel.level / u.fuel.capacity) * 100)}%`;
-    set(el.warp, `x${u.warp}`);
-    set(el.shot, pipCam.shotName.toUpperCase());
-    const recent = log.filter((e) => now - e.t < 15_000).slice(-4);
-    const html = recent.map((e) => `<div style="opacity:${Math.max(0.25, 1 - (now - e.t) / 15_000).toFixed(2)}">${e.text.replace(/[<&]/g, '')}</div>`).join('');
-    if (el.log.innerHTML !== html) el.log.innerHTML = html;
-    return;
-  }
-  // video fallback: no DOM to draw on, so paint the overlay into the frame
-  c.setTransform(d, 0, 0, d, 0, 0);
-  c.fillStyle = 'rgba(22,22,29,0.75)';
-  c.fillRect(0, ch - 40, cw, 40);
-  c.fillStyle = '#b7b7ff';
-  c.font = '11px ui-monospace, Menlo, monospace';
-  c.textAlign = 'left';
-  c.fillText(`${u.star.name}  ${charted}/${u.planets.length} charted  ${state.credits} CR`, 8, ch - 25);
-  c.fillStyle = '#4c8df6';
-  c.fillText(`${autopilot.strategy}${tgt ? ' > ' + tgt.name : ''}${u.warp > 1 ? `  x${u.warp}` : ''}`, 8, ch - 9);
+  if (pip.pipWin.active) pip.drawFloating(dt);
+  undo();
 }
 
 // ---- jumping between systems (cruise) ----
@@ -987,6 +845,7 @@ function updateJump(dt) {
     showTitle();
     setTimeout(() => postcard({ focus: universe.star.pos, other: universe.ship.pos, caption: `Arrived at ${universe.star.name}`, sub: `${universe.planets.length} bodies · ${universe.profile.name}`, force: true }), 1500);
     logEvent(`Arrived at ${universe.star.name}`);
+    say('arrival');
     void visited;
   }
   if (jump.t > 2.6) {
@@ -994,7 +853,7 @@ function updateJump(dt) {
     flash.style.opacity = '0';
     setTimeout(() => { flash.style.transition = ''; }, 1500);
     jump = null;
-    sound.fanfare();
+    sound.arrive();
   }
 }
 function showTitle() {
@@ -1041,7 +900,7 @@ function cruiseThink(dt) {
   const stale = u.now - lastDiscovery > 600 * patience;
   // never leave in the middle of an errand, or with someone calling for help
   if (autopilot.service || u.ships.some((sh) => sh.distress)) return;
-  if (doneHere || stale) jumpTo(1 + Math.floor(Math.random() * 9_999_999));
+  if (doneHere || stale) jumpTo(state.story.target && !state.story.done && state.story.target !== seed ? state.story.target : 1 + Math.floor(Math.random() * 9_999_999));
 }
 
 // "while you were away"
@@ -1066,9 +925,9 @@ resetAway();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     resetAway();
-    if (needTicker()) startTicker();
+    if (pip.needTicker()) pip.startTicker();
   } else {
-    if (!pipWin.active) stopTicker();
+    if (!pip.pipWin.active) pip.stopTicker();
     if (state.cruise) holdWake(true);
     if (Date.now() - away.since > 45_000 && (away.charted || away.systems || away.missions || newCards)) showAway();
     lastMs = performance.now(); // do not count the hidden time as one huge frame
@@ -1082,7 +941,15 @@ function tick(ms) {
   if (ms - lastMs < 8) return; // the page and the worker can both call this; only run once per frame
   const u = universe;
   const frameDt = Math.min(0.1, Math.max(0, (ms - lastMs) / 1000));
-  const manual = pilot(frameDt);
+  if (replay.queue && performance.now() > replay.queue.at) { const q = replay.queue; replay.queue = null; startReplay(q.seconds, q.focus, q.title); }
+  document.body.classList.toggle('replaying', !!replay.play); // (the HUD steps aside for a replay)
+  if (replay.play) { replayFrame(frameDt); lastMs = ms; return; }
+  let manual = pilot(frameDt);
+  if (!manual && maneuver.node) {
+    const r = maneuver.update(universe, frameDt * universe.timeScale);
+    if (r === 'done') { ui.toast('BURN COMPLETE', 'good'); state.counts.nodes++; sound.dock(); }
+    if (r) manual = true; // the planned burn has the controls (the autopilot stands by)
+  }
   if (manual) lastManual = performance.now();
   autopilot.manual = manual;
 
@@ -1091,10 +958,19 @@ function tick(ms) {
   const P = persona(state.options.persona);
   if (state.cruise && state.options.cruiseWarp && !manual) wantWarp = Math.max(wantWarp, u.ship.landing ? Math.min(4, P.warp) : P.warp);
   if (manual) wantWarp = Math.min(wantWarp, mag(u.ship.thrust) > 0 ? 1 : wantWarp);
+  if (maneuver.node?.burning) wantWarp = 1;
   u.warp = Math.min(wantWarp, warpCeiling());
 
+  const fuelBefore = u.fuel.level;
   u.step(ms / 1000);
   updateJump(u.frameDt);
+  const simDt = u.frameDt * u.timeScale * u.warp;
+  replay.record(u);
+  signalTick();
+  outpostIncome(G, simDt);
+  dailyTick(G, simDt, Math.max(0, fuelBefore - u.fuel.level));
+  // the music tenses up when the ship is in trouble
+  sound.setTension?.(clamp(Math.max((u.ship.heat ?? 0) * 1.4 - 0.3, u.ship.beam ? 1 : 0, state.hull < 35 ? (35 - state.hull) / 35 : 0, u.tidal), 0, 1));
 
   // per-frame derived state: prediction, orbit holding, comet rendezvous
   const ship = u.ship;
@@ -1102,7 +978,7 @@ function tick(ms) {
     predClock = 0;
     pred = predict(u, ship);
   } else if (!state.options.predict || ship.landing) pred = null;
-  ghostPred = ghostBurn && (!document.hidden || forceRender)
+  ghostPred = maneuver.node && (!document.hidden || forceRender) ? maneuver.ghost(u) : ghostBurn && (!document.hidden || forceRender)
     ? predict(u, { pos: ship.pos, velocity: { x: ship.velocity.x + Math.cos(ghostBurn.dir) * ghostBurn.dv, y: ship.velocity.y + Math.sin(ghostBurn.dir) * ghostBurn.dv }, landing: null, consumed: null }, { steps: 260 })
     : null;
   // scoreboard: sim time flown and fuel burned (refuelling does not count) under this style
@@ -1157,7 +1033,7 @@ function tick(ms) {
     drawStick(ctx, stick, dpr);
     drawShipCam();
   }
-  if (pipWin.active) drawFloating(u.frameDt);
+  if (pip.pipWin.active) pip.drawFloating(u.frameDt);
   hudClock += ms - lastMs; lastMs = ms;
   if (hudClock > 100) {
     hudClock = 0;
@@ -1188,7 +1064,7 @@ requestAnimationFrame(raf);
 
 window.__cam = cam; // handy for poking around in the console
 window.__game = {
-  jumpTo, setCruise, cycleWarp, get pred() { return pred; }, get log() { return log; }, get ghost() { return ghostPred; },
+  jumpTo, setCruise, cycleWarp, get pred() { return pred; }, get log() { return log; }, get ghost() { return ghostPred; }, get state() { return state; }, maneuver, replay,
   // debug: step and paint `seconds` of frames right now (for testing in a background page)
   run(seconds = 1) {
     forceRender = true;
@@ -1202,7 +1078,7 @@ window.__game = {
     const f = document.createElement('iframe');
     f.style.cssText = 'position:fixed;left:8px;top:8px;width:380px;height:380px;border:1px solid #b7b7ff;z-index:9';
     document.body.append(f);
-    await openDocumentPip(f.contentWindow);
+    await pip.openDocumentPip(f.contentWindow);
     pipCam.snap(universe, 380, 380);
   },
 };

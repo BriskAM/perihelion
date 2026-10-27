@@ -11,13 +11,18 @@ const blank = () => ({
   counts: blankCounts(), // running totals for achievements
   achievements: [],
   galaxy: [], // systems visited: { seed, system, name, cls, charted, total, t }
+  story: { stage: 0, target: null, targetName: '', done: false }, // the Signal (see story.js)
+  outposts: [], // relays you have deployed: { seedKey, idx, orbit, phase, name }
+  wing: { owned: false, persona: 'explorer', model: 'kite', name: 'Wing Osprey' },
+  daily: null,
+  captainLog: [], // { t, text }
   explored: {}, // seed -> [planet index]
   codex: [], // full text of every discovery
   done: [], // completed mission ids
   milestones: [],
   options: {
     survival: true, missions: true, assist: true, fancy: true, warp: true, strict: true, pip: true, orbit: true, pace: 1, volume: 0.6,
-    predict: true, smartcam: true, hop: true, autobuy: true, cruiseWarp: true, cinematic: true, persona: 'balanced',
+    predict: true, smartcam: true, hop: true, autobuy: true, cruiseWarp: true, cinematic: true, persona: 'balanced', replays: true, theme: 'auto',
   },
   cruise: false, // AFK mode: the ship keeps exploring (and hopping between systems) on its own
   stats: { systems: 0, comets: 0 },
@@ -29,7 +34,7 @@ export function loadSave() {
     const s = JSON.parse(localStorage.getItem(KEY));
     if (s && s.v === 1) {
       const b = blank();
-      return { ...b, ...s, options: { ...b.options, ...s.options }, upgrades: { ...b.upgrades, ...s.upgrades }, stats: { ...b.stats, ...s.stats }, counts: { ...b.counts, ...s.counts } };
+      return { ...b, ...s, options: { ...b.options, ...s.options }, upgrades: { ...b.upgrades, ...s.upgrades }, stats: { ...b.stats, ...s.stats }, counts: { ...b.counts, ...s.counts }, story: { ...b.story, ...s.story }, wing: { ...b.wing, ...s.wing } };
     }
   } catch { /* storage blocked or corrupt: start fresh */ }
   return blank();
