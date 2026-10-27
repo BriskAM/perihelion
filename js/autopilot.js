@@ -5,6 +5,7 @@ import {
   MAIN_ENGINE_ACCEL, CRAFT_SPEED_LIMIT, GRAVITATION, SPACECRAFT_MASS, landingSpeedLimit,
 } from './universe.js';
 import { densityAt, heatSafeSpeed, DRAG_COEFF } from './planets.js';
+import { conic } from './predict.js';
 
 const BRAKING_TIME = 5;
 const LAUNCH_THRUST_TIME = 5;
@@ -52,6 +53,22 @@ export class Autopilot {
     this.leadingPos = vec();
     this.strategy = 'NONE';
     this.debug = '';
+    this.history = new Map(); // world -> { t, n }: when we were last there and how often
+    this.recent = []; // the last few worlds visited, never picked again straight away
+    this.wandering = false; // nothing new left in reach: touring instead of charting
+    this.via = null; // a gravity assist planned on the way to the target
+    this.tour = false; // orbit the target for a while instead of landing
+    this.onEvent = null; // ({ kind: 'assist' | 'tour', ... }) => void
+  }
+
+  /** What the camera should look at: the slingshot world while one is under way, else the target. */
+  get focus() { return this.via?.body ?? this.target; }
+
+  remember(p) {
+    const h = this.history.get(p) ?? { t: 0, n: 0 };
+    this.history.set(p, { t: this.universe.now, n: h.n + 1 });
+    this.recent.push(p);
+    if (this.recent.length > 3) this.recent.shift();
   }
 
   get turn() { return TURN_RATE * this.pace; }
@@ -62,7 +79,8 @@ export class Autopilot {
     const lock = this.strategy === 'ACQUIRING' ? ` ${Math.round(this.lock * 100)}%` : '';
     return [
       '---- AUTOPILOT ENGAGED ----',
-      'TGT: ' + (this.target ? this.target.name.toUpperCase() + (this.uncharted ? ' (UNCHARTED)' : '') : 'SELECTING...'),
+      'TGT: ' + (this.target ? this.target.name.toUpperCase() + (this.uncharted ? ' (UNCHARTED)' : this.tour ? ' (ORBIT TOUR)' : this.relay ? ' (RELAY)' : this.wandering ? ' (REVISIT)' : '') : 'SELECTING...') +
+        (this.via ? `  VIA ${this.via.body.name.toUpperCase()}` : ''),
       'EXE: ' + this.strategy + lock + (this.debug ? ` (${this.debug})` : ''),
     ].join('\n');
   }
@@ -92,7 +110,7 @@ export class Autopilot {
       const from = this.ship.pos, hit = new Set();
       for (let k = 0; k <= 16; k++) {
         const r = mag(add(from, mul(sub(toPos, from), k / 16)));
-        for (const b of this.universe.belts) if (Math.abs(r - b.radius) < b.width / 2 + 300) hit.add(b);
+        for (const b of this.universe.belts) if (!b.trojan && Math.abs(r - b.radius) < b.width / 2 + 300) hit.add(b);
       }
       for (const b of hit) cost += burn * (b.width / 350 + 8);
     }
@@ -120,31 +138,215 @@ export class Autopilot {
     const surveyable = (p) => {
       if (!p.gas) return true;
       const d = p.radius + p.atmo.top * 0.85;
-      return (GRAVITATION * SPACECRAFT_MASS * p.mass) / (d * d) < 800;
+      return (GRAVITATION * SPACECRAFT_MASS * p.mass) / (d * d) < 550; // leave room to climb back out (heavier: scan pass)
     };
-    let pool = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p) && surveyable(p) && clearOfAir(p));
-    if (f) pool = pool.filter(reach); // never plan a trip the tank cannot cover
-    if (f && !pool.length && u.planets.some((p) => !this.charted(p))) {
-      // uncharted worlds exist but are out of range: refuel at the nearest world first
-      this.refuelling = true;
-      this.uncharted = false;
-      return this.nearest(u.planets.filter((p) => !p.isMoon && !p.gas));
+    // giants too heavy to dip into can still be charted from orbit (an orbit tour counts as a survey)
+    // every giant can be charted: light ones by dipping into the cloud tops, heavy ones by a scan pass
+    const candidates = u.planets.filter((p) => !this.charted(p) && p !== this.lastTarget && allowed(p) && reachableMoon(p) && clearOfAir(p));
+    let pool = f ? candidates.filter(reach) : candidates; // never plan a trip the tank cannot cover
+    this.tour = false; this.tourHeld = 0;
+    this.scanPass = false;
+    this.relay = false;
+    if (f && !pool.length && candidates.length) {
+      // Uncharted worlds exist but are out of range. Refuel first only if a full tank would actually
+      // get us there; otherwise (or if we are already full) hop to a world that brings us closer.
+      // Without this check the old autopilot refuelled, took off, still could not reach it, and landed
+      // back on the same world forever.
+      const fullOk = candidates.filter((p) => this.tripCost(mag(sub(p.pos, ship.pos)), p.pos) * 1.5 + 8 <= f.capacity);
+      const nearest = this.nearest(u.planets.filter((p) => !p.isMoon && !p.gas && !this.recent.includes(p)));
+      if (fullOk.length && f.level < 0.85 * f.capacity && nearest && reach(nearest)) {
+        this.refuelling = true;
+        this.uncharted = false;
+        return nearest;
+      }
+      const goal = candidates.slice().sort((a, b) => dist(a.pos, ship.pos) - dist(b.pos, ship.pos))[0];
+      const dGoal = dist(goal.pos, ship.pos);
+      const stones = u.planets.filter((p) => !p.gas && reachableMoon(p) && p !== this.lastTarget && reach(p) &&
+        dist(p.pos, goal.pos) < dGoal - 3000);
+      if (stones.length) {
+        this.refuelling = true; this.relay = true; this.uncharted = false;
+        return stones.sort((a, b) => dist(a.pos, goal.pos) - dist(b.pos, goal.pos))[0];
+      }
+      for (const p of candidates) this.skip.set(p, now + 240); // nothing gets us closer: leave them for now
     }
     this.uncharted = pool.length > 0;
-    // everything is charted: wander between solid planets (gas giants are costly to leave again)
-    if (!pool.length) pool = u.planets.filter((p) => !p.isMoon && !p.gas && p !== this.lastTarget);
-    if (!pool.length) pool = u.planets.filter((p) => !p.gas && reachableMoon(p));
-    if (!pool.length) pool = u.planets;
+    this.wandering = !pool.length;
+    if (!pool.length) {
+      // Everything in reach is charted: wander, but somewhere we have not been lately. Solid worlds
+      // and roomy giants both work, since we may just orbit for a while instead of landing.
+      const fresh = (p) => !this.recent.includes(p) && p !== this.lastTarget && reachableMoon(p) && clearOfAir(p) && (!f || reach(p));
+      pool = u.planets.filter((p) => !p.isMoon && (!p.gas || this.orbitPlan(p, true)) && fresh(p));
+      if (!pool.length) pool = u.planets.filter((p) => !p.gas && fresh(p));
+      if (!pool.length) pool = u.planets.filter((p) => !p.gas && p !== this.lastTarget);
+      if (!pool.length) pool = u.planets;
+    }
     const weights = pool.map((p) => {
       const d = mag(sub(p.pos, ship.pos));
-      let w = (p.isMoon ? 0.6 : 1) / (1 + (d / 25_000) ** 2);
+      let w = (p.isMoon ? 0.6 : 1) / (1 + (d / (this.wandering ? 60_000 : 25_000)) ** 2);
+      if (this.wandering) { // prefer places we have not seen in a long time
+        const h = this.history.get(p);
+        if (h) w *= (1 - Math.exp(-(now - h.t) / 240)) / (1 + 0.6 * h.n);
+      }
       if (f && f.burn * (11 + d / 5000) + 15 > f.level) w *= 0.05;
       if (this.pathBlockedByStar(p)) w *= 0.02; // a route straight through a star is a bad idea; prefer the near side
       return w;
     });
     let x = (this.rng ?? Math.random)() * weights.reduce((a, b) => a + b, 0);
-    for (let i = 0; i < pool.length; i++) { x -= weights[i]; if (x < 0) return pool[i]; }
-    return pool[pool.length - 1];
+    let pick = pool[pool.length - 1];
+    for (let i = 0; i < pool.length; i++) { x -= weights[i]; if (x < 0) { pick = pool[i]; break; } }
+    // A heavy giant pulls harder than the engine near its clouds, so instead of dipping in we chart it
+    // with a scan pass: a close slingshot swing just above the cloud tops.
+    if (pick.gas && !this.charted(pick) && !surveyable(pick)) { this.scanPass = true; return pick; }
+    // wandering: often just orbit for a while and move on (gas giants get a high, safe orbit)
+    if (this.wandering && this.orbitPlan(pick, true) && (pick.gas || (this.rng ?? Math.random)() < 0.55)) {
+      this.tour = true;
+      this.tourTime = (this.rng ?? Math.random)() * 15 + 18;
+    } else if (this.wandering && pick.gas) {
+      this.scanPass = true; // no room for a safe orbit: a swing past it instead
+    }
+    return pick;
+  }
+
+  /**
+   * Gravity assist: if a big world sits roughly on the way to the target, plan to swing past it.
+   * We aim to one side of it so that its pull bends our path toward the target, coast through the
+   * closest approach, and come out faster (or slower) and turned, depending on how it was moving.
+   */
+  planAssist(target) {
+    if (!this.assist) return null;
+    const u = this.universe, s = this.ship.pos, rnd = this.rng ?? Math.random;
+    const dT = dist(s, target.pos);
+    if (dT < 14_000) return null;
+    let best = null, bestScore = 0;
+    for (const g of u.planets) {
+      if (g === target || g.isMoon || g.isAnchor || g === target.parent || g.radius < 650) continue;
+      if (g.parent || g.binary) continue; // binary pairs make for messy slingshots
+      const dG = dist(s, g.pos), dGT = dist(g.pos, target.pos);
+      if (dG < 6000 || dGT < 6000) continue;
+      const detour = (dG + dGT) / dT;
+      if (detour > 1.45 || this.pathBlockedByStar(g)) continue;
+      const score = g.mass / detour ** 3;
+      if (score > bestScore) { best = g; bestScore = score; }
+    }
+    if (!best) return null;
+    const chance = this.ai ? 0.25 : this.wandering ? 0.85 : 0.5;
+    if (rnd() > chance) return null;
+    const top = best.atmo ? best.atmo.top : 0;
+    return { body: best, rp: best.radius + top + Math.max(220, best.radius * 0.3), phase: 'approach', since: u.now, vInf: 800 + rnd() * 350 };
+  }
+
+  /** A scan pass: swing past the target giant itself, low over the clouds. */
+  scanVia(target) {
+    const top = target.atmo ? target.atmo.top : 0;
+    // a binary partner is close by: pass wider, and on the far side from it
+    const rp = target.radius + top + Math.max(200, target.radius * (target.binary ? 0.9 : 0.22));
+    return { body: target, scan: true, rp, phase: 'approach', since: this.universe.now, vInf: 1000, away: target.binary ?? null };
+  }
+
+  /** Done with the target without landing (scan pass, tour, or gave up): move on. */
+  leave(target, skipFor = 0) {
+    if (skipFor) this.skip.set(target, this.universe.now + skipFor);
+    else { this.remember(target); this.visited.add(target); }
+    this.lastTarget = target;
+    this.target = null; this.via = null; this.tour = false; this.scanPass = false;
+    this.orbitPhase = null; this.lock = 0;
+  }
+
+  /** Fly the planned gravity assist. Returns false once it is over (or abandoned). */
+  flyby(ship, sim) {
+    const v = this.via, g = v.body, now = sim.now;
+    this.progressAt = now; // a detour is not being stuck
+    const rel = sub(ship.pos, g.pos), d = mag(rel), relV = sub(ship.velocity, g.velocity);
+    const mu = GRAVITATION * SPACECRAFT_MASS * g.mass;
+    if (now - v.since > 160 || ship.heat > 0.25 || (ship.heatRate ?? 0) > 0.35) { // going wrong: abandon the swing
+      if (v.scan) { this.leave(g, 120); return true; }
+      this.via = null; return false;
+    }
+    if (v.phase === 'approach') {
+      const toG = mul(rel, -1);
+      const b = v.rp * Math.sqrt(1 + (2 * mu) / (v.rp * v.vInf * v.vInf)); // impact parameter for that periapsis
+      const coastR = Math.max(b * 2.2, g.radius * 5);
+      if (!v.n || d > coastR * 1.6) { // pick the side that bends us toward the target (fixed once we are close)
+        const vin = mag(relV) > 200 ? relV : toG;
+        const perp = unit(vec(-vin.y, vin.x));
+        // a scan pass goes round whichever side we are already on; an assist, the side that turns us toward the target
+        v.n = v.away ? mul(perp, dot(perp, sub(g.pos, v.away.pos)) >= 0 ? 1 : -1)
+          : v.scan ? mul(perp, dot(perp, rel) >= 0 ? 1 : -1)
+            : mul(perp, dot(perp, sub(this.target.pos, g.pos)) > 0 ? -1 : 1);
+      }
+      v.b = b;
+      if (d < coastR) {
+        v.phase = 'coast'; v.entrySpeed = mag(ship.velocity); v.entryDir = angleOf(ship.velocity); v.minD = d;
+        v.entryRel = mag(relV);
+      } else {
+        const aim = add(toG, mul(v.n, b));
+        const route = this.routeAroundWells(ship, aim, g);
+        const dir = unit(route ?? aim);
+        // arrive slowly: the slower the approach, the harder the world bends the path
+        let speed = Math.min(Math.sqrt(2 * 380 * Math.max(0, d - coastR)) + v.vInf, 2400, this.beltSpeedCap(ship, aim));
+        const push = this.avoidance(ship, aim, g);
+        if (this.avoidActive) speed = Math.min(speed, 1800);
+        this.burnToward(ship, add(mul(dir, speed), mul(push, 0.9 * speed)), relV, 300);
+        this.strategy = 'ASSIST: LINING UP';
+        this.debug = `${g.name} in ${Math.round(d - g.radius)}`;
+        return true;
+      }
+    }
+    // coasting through the swing: hands off, unless the pass would clip the world or one of its moons
+    v.minD = Math.min(v.minD, d);
+    v.coastSince ??= now;
+    if (now - v.coastSince > 35) { // trims left us circling instead of swinging past: climb out properly
+      if (v.scan) this.leave(g, g.explored ? 0 : 120); else this.via = null;
+      this.departFrom = g; this.departUntil = now + 40;
+      return true;
+    }
+    const inbound = dot(rel, relV) < 0;
+    const o = inbound ? conic(g, rel.x, rel.y, relV.x, relV.y, 24) : null;
+    const floor = g.radius + (g.atmo ? g.atmo.top : 0) + 110;
+    const dodge = this.moonDodge(ship, g);
+    const sp = mag(relV) || 1, out = unit(sub(rel, mul(relV, dot(rel, relV) / (sp * sp)))); // square to our motion, away from the world
+    // corrections stick until they are done (switching heading every frame meant never lining up to burn)
+    const pe = o ? o.pe : Infinity;
+    if (v.fix === 'out' && (!inbound || pe > floor + 0.25 * (v.rp - floor) + 60)) v.fix = null;
+    if (v.fix === 'in' && (!inbound || pe < v.rp * 1.04 || d < v.rp * 1.5)) v.fix = null;
+    if (v.fix === 'dodge' && mag(dodge) < 30) v.fix = null;
+    if (!v.fix) {
+      if (o && pe < floor) v.fix = 'out';
+      else if (o && pe > v.rp * 1.15 && d > v.rp * 1.8) v.fix = 'in'; // passing too wide: tuck in for a tighter swing
+      else if (mag(dodge) > 60) v.fix = 'dodge';
+    }
+    if (v.fix === 'out') {
+      this.burnToward(ship, add(relV, mul(out, 400)), relV, 200, 8);
+      this.strategy = v.scan ? 'SCAN: TRIM' : 'ASSIST: TRIM';
+    } else if (v.fix === 'in') {
+      this.burnToward(ship, add(relV, mul(out, -250)), relV, 200, 8);
+      this.strategy = v.scan ? 'SCAN: TRIM' : 'ASSIST: TRIM';
+    } else if (v.fix === 'dodge') {
+      this.burnToward(ship, add(relV, dodge), relV, 200, 8);
+      this.strategy = v.scan ? 'SCAN: DODGE' : 'ASSIST: DODGE';
+    } else {
+      ship.thrust = vec(); // coast, holding the heading so a correction can start at once
+      this.strategy = v.scan ? (g.explored ? 'SCAN: DONE' : 'SCAN PASS') : 'SLINGSHOT';
+    }
+    this.debug = `${g.name}  pe ${Math.round(v.minD - g.radius)}  v ${Math.round(mag(relV))}`;
+    if (!inbound && d > Math.max(v.b * 1.5, g.radius * 4)) {
+      const gain = mag(ship.velocity) - v.entrySpeed;
+      const turn = Math.abs(wrap(angleOf(ship.velocity) - v.entryDir)) * (180 / Math.PI);
+      if (this.onEvent) this.onEvent({ kind: v.scan ? 'scan' : 'assist', body: g, gain, turn, pe: v.minD - g.radius });
+      if (v.scan) { this.leave(g); return true; } // charted on the way past: on to the next world
+      this.via = null;
+      return false;
+    }
+    return true;
+  }
+
+  finishTour(target) {
+    if (!target.explored && !this.ai) this.universe.survey(target); // mapped from orbit
+    if (this.onEvent) this.onEvent({ kind: 'tour', body: target });
+    this.leave(target);
+    this.departFrom = target; // climb out properly before chasing anything else
+    this.departUntil = this.universe.now + 40;
+    this.strategy = 'DEPARTING';
   }
 
   /**
@@ -273,7 +475,7 @@ export class Autopilot {
 
   /** Belts are rock walls at speed: slow down before the path enters one, and stay slow inside. */
   beltSpeedCap(ship, vector) {
-    const belts = this.universe.belts;
+    const belts = this.universe.belts.filter((b) => !b.trojan);
     if (!belts.length) return Infinity;
     const L = mag(vector), steps = 32;
     for (let k = 0; k <= steps; k++) {
@@ -289,6 +491,7 @@ export class Autopilot {
   arriveAtGas(ship, target) {
     this.dwell = 0;
     this.visited.add(target);
+    this.remember(target);
     this.lastTarget = target;
     this.target = null;
     this.refuelling = false;
@@ -427,10 +630,13 @@ export class Autopilot {
    * height) the old final-landing logic takes over. Returns null when this target is not a good fit
    * (moons, gas giants, worlds whose gravity zone is too small for a stable orbit).
    */
-  orbitPlan(target) {
-    if (!this.assist || !this.orbitFirst || target.gas || target.isMoon || !target.hill) return null;
+  orbitPlan(target, tour = this.tour && target === this.target) {
+    // (tours may circle gas giants too: they never descend into the air)
+    if (!target || !this.assist || (!this.orbitFirst && !tour) || (target.gas && !tour) || target.isMoon || !target.hill) return null;
+    if (tour && target.binary) return null; // the partner world keeps tugging a tour off course
     const top = target.atmo ? target.atmo.top : 0;
-    const rOrb = target.radius + Math.max(top + 60, 0.45 * target.radius, 120);
+    // giants: well clear of the air, so a capture that overshoots never dips into it
+    const rOrb = target.gas ? target.radius + top * 1.6 + 250 : target.radius + Math.max(top + 60, 0.45 * target.radius, 120);
     if (rOrb > 0.3 * target.hill) return null;
     // big moons that cross the capture path make orbit-first risky (a coplanar orbit meets them head-on)
     let risk = 0;
@@ -468,12 +674,18 @@ export class Autopilot {
     const stopAlt = Math.max(this.landingAltitude, hover);
     const alt = r - target.radius;
     if (this.orbitPhase === 'capture' || this.orbitPhase === 'orbit') {
-      const circular = Math.abs(r - plan.rOrb) < 0.18 * plan.rOrb && Math.abs(vr) < 0.15 * vc && Math.abs(vt - sense * vc) < 0.18 * vc;
+      // in: within 18% of a circular orbit; out: beyond 30% (the gap stops it flickering between the two)
+      const k = this.orbitPhase === 'orbit' ? 0.3 : 0.18;
+      const circular = Math.abs(r - plan.rOrb) < k * plan.rOrb && Math.abs(vr) < (k - 0.03) * vc && Math.abs(vt - sense * vc) < k * vc;
+      if (this.tour && Math.abs(r - plan.rOrb) < 0.35 * plan.rOrb) { // tour time counts whenever we are roughly in orbit
+        this.tourHeld = (this.tourHeld ?? 0) + this.universe.dt;
+        if (this.tourHeld > this.tourTime) { this.finishTour(target); return true; }
+      }
       if (this.orbitPhase === 'capture') {
         if (circular) { this.orbitPhase = 'orbit'; this.orbitSince = now; }
-        else if (now - this.orbitSince > 90) { this.orbitPhase = 'descent'; }
+        else if (now - this.orbitSince > 90) { if (this.tour) { this.finishTour(target); return true; } this.orbitPhase = 'descent'; }
       } else if (!circular) this.orbitPhase = 'capture';
-      else if (now - this.orbitSince > 1.5 / q) this.orbitPhase = 'descent';
+      else if (!this.tour && now - this.orbitSince > 1.5 / q) this.orbitPhase = 'descent';
     }
 
     if (this.orbitPhase === 'capture') {
@@ -484,8 +696,8 @@ export class Autopilot {
       return true;
     }
     if (this.orbitPhase === 'orbit') {
-      this.strategy = 'ORBITING';
-      this.debug = `v ${Math.round(vc)}`;
+      this.strategy = this.tour ? 'ORBIT TOUR' : 'ORBITING';
+      this.debug = this.tour ? `${Math.max(0, Math.round(this.tourTime - (this.tourHeld ?? 0)))}s left` : `v ${Math.round(vc)}`;
       ship.thrust = vec();
       return true;
     }
@@ -553,6 +765,8 @@ export class Autopilot {
         this.orbitPhase = null;
         this.lastTarget = this.target;
         this.visited.add(this.target);
+        this.remember(this.target);
+        this.via = null;
         this.target = null;
         this.refuelling = false;
         this.lock = 0;
@@ -595,6 +809,19 @@ export class Autopilot {
         return;
       }
     }
+    if (this.departFrom && !this.target) {
+      // leaving an orbit: burn prograde (along our motion round the world) until we are fast enough
+      // to escape. That spirals outward, never down into the air the way aiming straight off can.
+      const p = this.departFrom, rel = sub(ship.pos, p.pos), d = mag(rel), relV = sub(ship.velocity, p.velocity);
+      const vEsc = Math.sqrt((2 * GRAVITATION * SPACECRAFT_MASS * p.mass) / Math.max(d, 1));
+      if (mag(relV) > 1.15 * vEsc || d > p.radius * 7 || sim.now > this.departUntil) { this.departFrom = null; ship.thrust = vec(); }
+      else {
+        this.strategy = 'DEPARTING';
+        this.debug = `${Math.round((mag(relV) / vEsc) * 100)}% of escape`;
+        this.burnToward(ship, mul(unit(relV), 1.25 * vEsc), relV, 250, 6);
+        return;
+      }
+    }
     if (!this.target) {
       // assisted: cut the launch burn as soon as we are clear of the world we left, instead of
       // blasting blindly for five seconds (that used to fly moon launches into their planet)
@@ -611,6 +838,7 @@ export class Autopilot {
       if (gated && !clear) return;
       if (clear) { ship.thrust = vec(); this.nextStrategyTime = 0; }
       this.target = this.pickTarget(sim);
+      this.via = this.scanPass ? this.scanVia(this.target) : this.planAssist(this.target);
       this.bestDist = Infinity;
       this.progressAt = sim.now;
       this.dwell = 0;
@@ -623,6 +851,7 @@ export class Autopilot {
     if (f && !this.refuelling && this.tripCost(mag(sub(this.target.pos, ship.pos)), this.target.pos) * 1.2 + 8 > f.level) {
       this.target = this.nearest(this.universe.planets.filter((p) => !p.isMoon && !p.gas));
       this.refuelling = true;
+      this.via = null; this.tour = false;
       this.lock = 0;
       this.brakingDistance = 0;
     }
@@ -632,7 +861,7 @@ export class Autopilot {
     if (this.assist && this.strategy !== 'ACQUIRING') {
       const dNow = mag(sub(target.pos, ship.pos));
       const rs = mag(ship.pos);
-      const belt = this.universe.belts.find((b) => Math.abs(rs - b.radius) < b.width / 2 + 300);
+      const belt = this.universe.belts.find((b) => !b.trojan && Math.abs(rs - b.radius) < b.width / 2 + 300);
       if (dNow < this.bestDist - 200) { this.bestDist = dNow; this.progressAt = sim.now; }
       else if (sim.now - this.progressAt > (belt ? 6 : 25)) { // pinned in a rock field gives up much sooner
         if (belt) { // inside a rock field: head straight out through the nearer edge
@@ -641,6 +870,7 @@ export class Autopilot {
           this.escapeUntil = sim.now + 10;
         }
         this.skip.set(target, sim.now + 180);
+        this.via = null;
         this.target = null; this.lock = 0; this.bestDist = Infinity; this.progressAt = sim.now;
         return;
       }
@@ -674,7 +904,9 @@ export class Autopilot {
       fromAngle(angleOf(target.velocity), Math.min(altitude / 2, mag(target.velocity))));
     const leadingVector = sub(this.leadingPos, ship.pos);
 
-    if (this.assist) {
+    if (this.assist && this.via && this.flyby(ship, sim)) {
+      // swinging past a world on the way
+    } else if (this.assist) {
       this.guide(ship, target, targetVector, altitude, relativeV);
     } else if (altitude < this.landingAltitude) {
       this.strategy = 'LANDING'; // zero thrust, face away from the ground

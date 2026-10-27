@@ -107,6 +107,20 @@ const builders = {
 };
 builders.ocean = (rng, major, minor) => builders.continents(rng, major, minor, rng.int(5, 10));
 
+/** 'rgba(r,g,b,a)' or '#rrggbb' -> 'rgba(r,g,b,alpha)' */
+const rgbCache = new Map();
+export function tint(color, alpha) {
+  let rgb = rgbCache.get(color);
+  if (!rgb) {
+    if (color[0] === '#') {
+      const h = color.length === 4 ? color.slice(1).split('').map((c) => c + c).join('') : color.slice(1, 7);
+      rgb = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)).join(',');
+    } else rgb = color.replace(/^rgba?\(/, '').split(',').slice(0, 3).join(',');
+    rgbCache.set(color, rgb);
+  }
+  return `rgba(${rgb},${alpha})`;
+}
+
 export function visual(p) {
   if (p.vis) return p.vis;
   const rng = makeRng((p.seed ^ 0x5bd1e995) >>> 0);
@@ -117,6 +131,9 @@ export function visual(p) {
   if (spec.kind) kind = spec.kind;
   else if (p.gas) kind = rng.choose(['gas', 'gas', 'swirl']);
   else if (small) kind = rng.choose(['craters', 'craters', 'cracks']);
+  else if (p.lava) kind = rng.choose(['cracks', 'cracks', 'craters']);
+  else if (p.climate === 'frozen') kind = rng.choose(['cracks', 'craters', 'swirl']);
+  else if (p.living) kind = rng.choose(['continents', 'ocean']);
   else kind = rng.choose(['continents', 'craters', 'ocean', 'cracks', 'swirl']);
 
   const outline = new Path2D();
@@ -130,102 +147,229 @@ export function visual(p) {
     ? { inner: rng.range(1.35, 1.6), width: rng.range(0.25, 0.7), ry: rng.range(0.18, 0.38), tilt: rng.range(-0.6, 0.6) }
     : null;
   const rings = spec.rings !== undefined ? spec.rings : rolled;
+  if (rings) { // bands of different density, with a dark division somewhere in the middle
+    const n = rng.int(4, 8), gap = rng.int(1, n - 1);
+    rings.bands = [];
+    for (let i = 0; i < n; i++) {
+      if (i === gap) continue;
+      rings.bands.push({ k: rings.inner + (rings.width * (i + 0.5)) / n, w: (rings.width / n) * rng.range(0.7, 1), a: rng.range(0.12, 0.42) });
+    }
+  }
   const major = new Path2D(), minor = new Path2D();
   builders[kind](rng, major, minor);
-  return (p.vis = { kind, lumpy: small, outline, rings, major, minor });
-}
-
-function ringEllipse(ctx, rings, R, start, end) {
-  for (const k of [rings.inner, rings.inner + rings.width * 0.45, rings.inner + rings.width]) {
-    ctx.beginPath();
-    ctx.ellipse(0, 0, R * k, R * k * rings.ry, 0, start, end);
-    ctx.stroke();
+  // gas giants: soft filled bands and a big storm
+  let bands = null, storm = null;
+  if (kind === 'gas' || (p.gas && kind === 'swirl')) {
+    bands = new Path2D();
+    const n = rng.int(3, 7);
+    for (let i = 0; i < n; i++) {
+      const y = -0.9 + (1.8 * (i + rng.range(0.1, 0.6))) / n, hgt = rng.range(0.05, 0.16);
+      bands.rect(-1.1, y, 2.2, hgt);
+    }
+    if (rng() < 0.7) storm = { x: rng.range(-0.45, 0.45), y: rng.range(-0.55, 0.55), r: rng.range(0.08, 0.2) };
   }
+  // clouds for worlds with air (they drift faster than the ground turns)
+  let clouds = null;
+  if (p.atmo && !p.gas) {
+    clouds = new Path2D();
+    const n = rng.int(4, 9);
+    for (let i = 0; i < n; i++) {
+      const y = rng.range(-0.8, 0.8), x0 = rng.range(-0.9, 0.3), len = rng.range(0.25, 0.8);
+      for (let k = 0; k <= 12; k++) {
+        const x = x0 + (len * k) / 12, yy = y + Math.sin(k * 0.7 + i) * 0.03;
+        if (k === 0) clouds.moveTo(x, yy); else clouds.lineTo(x, yy);
+      }
+    }
+  }
+  // city lights on the night side of inhabited worlds
+  const cities = p.living ? Array.from({ length: rng.int(10, 26) }, () => {
+    const a = rng() * PI2, d = Math.sqrt(rng()) * 0.85;
+    return [Math.cos(a) * d, Math.sin(a) * d, rng.range(0.008, 0.02)];
+  }) : null;
+  return (p.vis = { kind, lumpy: small, outline, rings, major, minor, bands, storm, clouds, cities });
 }
 
-/** Draw planet body, surface texture (if `showTex`) and rings. */
-export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now = 0) {
+function drawRings(ctx, p, v, R, color, px, front) {
+  const r = v.rings;
+  ctx.save();
+  ctx.translate(p.pos.x, p.pos.y);
+  ctx.rotate(p.seed % 2 ? r.tilt : -r.tilt);
+  ctx.scale(1, r.ry);
+  const [s, e] = front ? [0, Math.PI] : [Math.PI, PI2];
+  if (r.bands) {
+    for (const b of r.bands) {
+      ctx.strokeStyle = tint(color, b.a * (front ? 1 : 0.7));
+      ctx.lineWidth = b.w * R;
+      ctx.beginPath(); ctx.arc(0, 0, R * b.k, s, e); ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = tint(color, front ? 0.9 : 0.5);
+  ctx.lineWidth = px * 1.2;
+  for (const k of [r.inner, r.inner + r.width]) { ctx.beginPath(); ctx.arc(0, 0, R * k, s, e); ctx.stroke(); }
+  ctx.restore();
+}
+
+/**
+ * Draw planet body, surface texture (if `showTex`) and rings. `light` is the position of the star
+ * lighting it (day side, night side, a bright rim); `dim` is how strong that light is.
+ */
+export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now = 0, light = null, explored = true) {
   const v = visual(p), R = p.radius;
-  const ringReach = Math.max(v.rings ? v.rings.inner + v.rings.width : 1, p.atmo ? 1 + p.atmo.top / R : 1);
+  const ringReach = Math.max(v.rings ? v.rings.inner + v.rings.width : 1, p.atmo ? 1 + (p.atmo.top * 1.3) / R : 1);
   if (!inView(view, p.pos.x, p.pos.y, R * ringReach)) return;
-  const lumpy = v.lumpy;
-  const drawRings = v.rings && R * ringReach * view.zoom < 3000; // not worth it when huge on screen
+  const lumpy = v.lumpy, lite = view.lite;
+  const onScreen = R * view.zoom;
+  const showRings = v.rings && R * ringReach * view.zoom < 3000; // not worth it when huge on screen
+  const la = light ? Math.atan2(light.y - p.pos.y, light.x - p.pos.x) : null;
   ctx.save();
 
-  if (drawRings) {
-    ctx.save();
-    ctx.translate(p.pos.x, p.pos.y);
-    ctx.rotate(p.seed % 2 ? v.rings.tilt : -v.rings.tilt);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.55;
-    ctx.lineWidth = px;
-    ringEllipse(ctx, v.rings, R, 0, PI2);
-    ctx.restore();
-  }
+  if (showRings) drawRings(ctx, p, v, R, color, px, false);
 
-  if (p.atmo && !view.lite) { // atmosphere: a few fading shells above the surface, thicker air = brighter
+  if (p.atmo && !lite) { // atmosphere: a soft glow plus a few fading shells, thicker air = brighter
     const top = p.atmo.top, a = Math.min(0.6, 0.15 + p.atmo.rho0 * 0.5);
-    ctx.strokeStyle = p.haze ?? color;
-    ctx.lineWidth = 1.5 * px;
-    for (const k of [0.2, 0.45, 0.75, 1]) {
-      ctx.globalAlpha = a * (1.05 - k) * 0.7;
+    const haze = p.haze ?? color;
+    if (onScreen > 6 && onScreen < 4000) {
+      const g = ctx.createRadialGradient(p.pos.x, p.pos.y, R * 0.98, p.pos.x, p.pos.y, R + top * 1.25);
+      g.addColorStop(0, tint(haze, a * 0.55));
+      g.addColorStop(0.35, tint(haze, a * 0.18));
+      g.addColorStop(1, tint(haze, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.pos.x, p.pos.y, R + top * 1.25, 0, PI2); ctx.fill();
+    }
+    ctx.strokeStyle = haze;
+    ctx.lineWidth = 1.2 * px;
+    for (const k of [0.45, 1]) {
+      ctx.globalAlpha = a * (1.05 - k) * 0.6;
       ctx.beginPath();
       if (arcPath(ctx, view, p.pos.x, p.pos.y, R + top * k)) ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }
-  ctx.fillStyle = voidColor;
-  ctx.strokeStyle = color;
+
+  // body: dark disc with a faint wash of the planet's colour
   ctx.lineJoin = 'round';
-  if (lumpy) {
-    ctx.translate(p.pos.x, p.pos.y);
-    ctx.scale(R, R);
-    ctx.fill(v.outline);
+  const bodyPath = () => {
+    ctx.beginPath();
+    if (lumpy) { ctx.save(); ctx.translate(p.pos.x, p.pos.y); ctx.scale(R, R); ctx.restore(); }
+    return lumpy ? true : discPath(ctx, view, p.pos.x, p.pos.y, R);
+  };
+  const lumpPath = lumpy ? (() => { const m = new Path2D(); m.addPath(v.outline, new DOMMatrix([R, 0, 0, R, p.pos.x, p.pos.y])); return m; })() : null;
+  let visible = true;
+  if (lumpy) { ctx.fillStyle = voidColor; ctx.fill(lumpPath); ctx.fillStyle = tint(color, explored ? 0.1 : 0.05); ctx.fill(lumpPath); }
+  else {
+    visible = bodyPath();
+    if (visible) { ctx.fillStyle = voidColor; ctx.fill(); ctx.fillStyle = tint(color, explored ? (p.gas ? 0.13 : 0.09) : 0.04); ctx.fill(); }
+  }
+
+  if (visible && !lite && (showTex || light)) {
+    ctx.save();
+    if (lumpy) ctx.clip(lumpPath); else { bodyPath(); ctx.clip(); }
     if (showTex) {
       ctx.save();
-      ctx.clip(v.outline);
+      ctx.translate(p.pos.x, p.pos.y);
       ctx.rotate((p.spin ?? 0) * now);
+      ctx.scale(R, R);
+      const texA = explored ? 1 : 0.35;
+      if (v.bands) { ctx.fillStyle = tint(color, 0.1 * texA); ctx.fill(v.bands); }
+      if (v.storm) {
+        ctx.fillStyle = tint(color, 0.22 * texA);
+        ctx.beginPath(); ctx.ellipse(v.storm.x, v.storm.y, v.storm.r, v.storm.r * 0.6, 0, 0, PI2); ctx.fill();
+      }
+      ctx.strokeStyle = color;
       ctx.lineWidth = px / R;
+      ctx.globalAlpha = texA;
       ctx.stroke(v.major);
-      ctx.globalAlpha = 0.45;
+      ctx.globalAlpha = 0.45 * texA;
       ctx.stroke(v.minor);
-      ctx.restore();
-    }
-    ctx.lineWidth = (2 * px) / R;
-    ctx.stroke(v.outline);
-  } else {
-    ctx.beginPath();
-    if (discPath(ctx, view, p.pos.x, p.pos.y, R)) {
-      ctx.fill();
-      if (showTex) {
-        ctx.save();
-        ctx.clip();
-        ctx.translate(p.pos.x, p.pos.y);
-        ctx.rotate((p.spin ?? 0) * now);
-        ctx.scale(R, R);
-        ctx.lineWidth = px / R;
+      if (p.lava && explored) { // molten world: the cracks glow
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.55 + 0.2 * Math.sin(now * 1.7 + p.seed);
+        ctx.strokeStyle = '#ff7a2a';
+        ctx.lineWidth = (2.6 * px) / R;
         ctx.stroke(v.major);
-        ctx.globalAlpha = 0.45;
-        ctx.stroke(v.minor);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      ctx.globalAlpha = 1;
+      // impact scars: glowing when fresh, then a dark ring that stays
+      if (p.impacts) {
+        for (const im of p.impacts) {
+          const age = now - im.t, x = Math.cos(im.a) * 0.96, y = Math.sin(im.a) * 0.96, r = im.size / R;
+          if (age < 45) {
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.fillStyle = `rgba(255,140,60,${0.7 * (1 - age / 45)})`;
+            ctx.beginPath(); ctx.arc(x, y, r * (1 + age / 90), 0, PI2); ctx.fill();
+            ctx.globalCompositeOperation = 'source-over';
+          }
+          ctx.strokeStyle = tint(color, 0.7);
+          ctx.lineWidth = (1.4 * px) / R;
+          ctx.beginPath(); ctx.arc(x, y, r, 0, PI2); ctx.stroke();
+        }
+      }
+      ctx.restore();
+      if (v.clouds && explored) { // clouds drift a little faster than the ground
+        ctx.save();
+        ctx.translate(p.pos.x, p.pos.y);
+        ctx.rotate((p.spin ?? 0.02) * now * 1.6 + 0.7);
+        ctx.scale(R, R);
+        ctx.strokeStyle = 'rgba(255,255,255,0.32)';
+        ctx.lineWidth = (2.2 * px) / R;
+        ctx.lineCap = 'round';
+        ctx.stroke(v.clouds);
         ctx.restore();
       }
     }
-    ctx.lineWidth = (p.gas ? 1 : 2) * px; // gas giants have no hard edge
-    ctx.globalAlpha = p.gas ? 0.6 : 1;
+    if (light) { // day side glows a little, night side falls into shadow
+      const dx = Math.cos(la), dy = Math.sin(la);
+      const day = ctx.createLinearGradient(p.pos.x + dx * R, p.pos.y + dy * R, p.pos.x, p.pos.y);
+      day.addColorStop(0, tint(color, (explored ? 0.26 : 0.12) * light.k));
+      day.addColorStop(1, tint(color, 0));
+      ctx.fillStyle = day;
+      ctx.fillRect(p.pos.x - R * 1.1, p.pos.y - R * 1.1, R * 2.2, R * 2.2);
+      const g = ctx.createLinearGradient(p.pos.x + dx * R * 0.35, p.pos.y + dy * R * 0.35, p.pos.x - dx * R, p.pos.y - dy * R);
+      g.addColorStop(0, tint(voidColor, 0));
+      g.addColorStop(0.45, tint(voidColor, 0.62 * light.k));
+      g.addColorStop(1, tint(voidColor, 0.86 * light.k));
+      ctx.fillStyle = g;
+      ctx.fillRect(p.pos.x - R * 1.1, p.pos.y - R * 1.1, R * 2.2, R * 2.2);
+      if (v.cities && explored && showTex) { // lights in the dark
+        const rot = (p.spin ?? 0) * now;
+        ctx.fillStyle = '#ffd98a';
+        for (const [cx, cy, cr] of v.cities) {
+          const x = cx * Math.cos(rot) - cy * Math.sin(rot), y = cx * Math.sin(rot) + cy * Math.cos(rot);
+          const night = -(x * dx + y * dy);
+          if (night < 0.15) continue;
+          ctx.globalAlpha = Math.min(1, (night - 0.15) * 3) * 0.85;
+          ctx.beginPath(); ctx.arc(p.pos.x + x * R, p.pos.y + y * R, Math.max(cr * R, 1.2 * px), 0, PI2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+  }
+
+  // outline: dim all round, bright on the lit limb
+  ctx.strokeStyle = color;
+  if (lumpy) {
+    ctx.lineWidth = 2 * px;
+    ctx.globalAlpha = light ? 0.6 : 1;
+    ctx.stroke(lumpPath);
+  } else {
+    ctx.lineWidth = (p.gas ? 1 : 1.6) * px;
+    ctx.globalAlpha = p.gas ? 0.45 : light ? 0.55 : 1;
     ctx.beginPath();
     if (arcPath(ctx, view, p.pos.x, p.pos.y, R)) ctx.stroke();
-    ctx.globalAlpha = 1;
+  }
+  ctx.globalAlpha = 1;
+  if (light && !lite && onScreen > 3 && onScreen < 6000) {
+    ctx.lineWidth = (onScreen > 40 ? 2.6 : 2) * px;
+    ctx.strokeStyle = tint(color, 0.95);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(p.pos.x, p.pos.y, R, la - 1.25, la + 1.25);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
   }
   ctx.restore();
 
-  if (drawRings) { // front half of the rings passes in front of the planet
-    ctx.save();
-    ctx.translate(p.pos.x, p.pos.y);
-    ctx.rotate(p.seed % 2 ? v.rings.tilt : -v.rings.tilt);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = px * 1.5;
-    ringEllipse(ctx, v.rings, R, 0, Math.PI);
-    ctx.restore();
-  }
+  if (showRings) drawRings(ctx, p, v, R, color, px, true);
 }

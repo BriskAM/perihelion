@@ -15,6 +15,7 @@ html, body {
   padding-right: max(6px, env(safe-area-inset-right)); padding-bottom: max(6px, env(safe-area-inset-bottom));
   font: 500 12px/12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   letter-spacing: 1px; color: var(--console);
+  text-shadow: 0 0 3px var(--void), 0 0 6px var(--void);
 }
 pre { margin: 0; font: inherit; white-space: pre-wrap; }
 #catalog { position: absolute; top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left));
@@ -24,11 +25,13 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 #autotext { color: var(--autopilot); margin-bottom: 6px; }
 .row { display: flex; align-items: flex-end; gap: 8px; }
 #ship { flex: 1; }
-#auto, #pipbtn {
+#auto, #pipbtn, #cruise, #warp {
   pointer-events: auto; font: inherit; letter-spacing: 1px; color: var(--console);
   background: transparent; border: 1px solid var(--console); padding: 6px 10px; min-width: 48px; min-height: 48px; cursor: pointer;
 }
-#auto.on { background: var(--autopilot); }
+#auto.on, #cruise.on { background: var(--autopilot); }
+#warp.on { background: #2f6b4a; border-color: #4ade80; color: #d6ffe6; }
+#warp, #pipbtn { min-width: 44px; padding: 6px 6px; }
 @media (min-aspect-ratio: 1/1) {
   #bottom { left: auto; width: 45%; }
 }
@@ -97,3 +100,22 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 #pip[hidden] { display: none; }
 
 #pipbtn { pointer-events: auto; }
+
+#cruise, #warp { pointer-events: auto; }
+#flash { position: fixed; inset: 0; background: #eef0ff; opacity: 0; pointer-events: none; }
+#titlecard {
+  position: fixed; left: 50%; top: 30%; transform: translate(-50%, -50%); text-align: center; pointer-events: none;
+  font: 500 11px/16px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 2px; color: var(--console);
+  max-width: 90vw;
+}
+#titlecard .big { font-size: 22px; line-height: 30px; letter-spacing: 6px; color: #e6e6ff; }
+#titlecard.show { animation: title 5.2s ease-out both; }
+@keyframes title { 0% { opacity: 0; letter-spacing: 12px; } 15% { opacity: 1; letter-spacing: 2px; } 80% { opacity: 1; } 100% { opacity: 0; } }
+#titlecard[hidden], #away[hidden] { display: none; }
+#away {
+  position: fixed; left: 50%; top: 22%; transform: translateX(-50%); padding: 14px 18px; min-width: 240px;
+  font: 500 12px/18px ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px; color: #b8f5cf;
+  background: rgba(22, 22, 29, 0.94); border: 1px solid #4ade80; animation: fadein 0.4s ease-out; cursor: pointer;
+}
+#away .head { color: #e6ffe9; margin-bottom: 6px; font-weight: 600; }
+@media (max-width: 420px) { .row { gap: 4px; } #auto, #pipbtn, #cruise, #warp { padding: 6px 5px; min-width: 40px; font-size: 11px; } }

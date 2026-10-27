@@ -10,7 +10,7 @@ const el = (tag, cls, text) => {
 
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
-export function createUI({ state, universe, missions, seed, actions }) {
+export function createUI({ state, game, actions }) {
   const menu = document.getElementById('menu');
   const body = el('div', 'body');
   const tabsEl = el('div', 'tabs');
@@ -55,6 +55,7 @@ export function createUI({ state, universe, missions, seed, actions }) {
   }
 
   function renderMissions() {
+    const { universe, missions } = game;
     body.append(el('h2', '', `SYSTEM ${universe.star.name.toUpperCase()}`));
     if (!state.options.missions) {
       body.append(el('p', 'dim', 'Missions are switched off (OPTIONS).'));
@@ -131,6 +132,18 @@ export function createUI({ state, universe, missions, seed, actions }) {
         () => actions.option(key, !state.options[key])));
       body.append(card);
     };
+    const cruise = el('div', 'card');
+    cruise.append(el('div', 'title', 'Cruise (AFK)'), el('div', 'dim', 'Press CRUISE (or C) and leave it: the autopilot explores on its own, warps through long coasts, refuels, buys upgrades and, once a system is charted, jumps to a new one. It keeps going in a background tab, and the PIP window shows it with a cinematic camera.'));
+    const crow = el('div', 'btnrow');
+    crow.append(button(state.cruise ? 'CRUISE: ON' : 'CRUISE: OFF', () => actions.cruise(!state.cruise)));
+    cruise.append(crow);
+    body.append(cruise);
+    toggleRow('hop', 'Cruise: jump to new systems', 'When everything here is charted (or nothing new has turned up for a while), cruise jumps to a fresh random system.');
+    toggleRow('autobuy', 'Cruise: buy upgrades', 'Spend credits on the cheapest ship upgrade whenever cruise can afford one.');
+    toggleRow('cruiseWarp', 'Cruise: time warp', 'Speed up long coasts between worlds (2x to 8x), dropping back to normal near anything.');
+    toggleRow('cinematic', 'Cinematic camera', 'In cruise, the camera cuts between chase, fly-by, planet and system shots. Grab the stick to fly and it steps aside.');
+    toggleRow('smartcam', 'Smart camera', 'Zooms out with speed, frames the nearest world and the autopilot target, leans ahead of the ship. Scroll or pinch to set how close you like it (0 resets). Off = fixed zoom.');
+    toggleRow('predict', 'Trajectory prediction', 'Your future path: the orbit around the world you are near (with periapsis and apoapsis), or the path through the system and any encounter ahead.');
     toggleRow('survival', 'Survival', 'Fuel burns when you thrust; the star corona burns it faster. Refuel by landing.');
     toggleRow('missions', 'Missions', 'Three jobs per system, paid in credits.');
     toggleRow('assist', 'Assisted autopilot', 'Takes time to lock on, turns at a limited rate, and hands control back when you grab the stick. Off = classic instant autopilot.');
@@ -161,6 +174,7 @@ export function createUI({ state, universe, missions, seed, actions }) {
     toggleRow('fancy', 'Fancy trails', 'Fading speed-coloured trails and engine glow. Off = classic dashed trail.');
 
     const card = el('div', 'card');
+    const seed = game.seed;
     card.append(el('div', 'title', typeof seed === 'string' ? seed : `Seed ${seed}`), el('div', 'dim', 'Share this system with a friend.'));
     const r = el('div', 'btnrow');
     r.append(button('SHARE LINK', actions.share), button('NEW RANDOM SYSTEM', actions.randomSeed),

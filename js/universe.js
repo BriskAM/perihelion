@@ -5,7 +5,8 @@ import { Namer } from './namer.js';
 import { makeDesign, randomDesign, makeCallsign } from './ships.js';
 import { Autopilot } from './autopilot.js';
 import { SOL } from './sol.js';
-import { rollPhysics, makeAtmosphere, densityAt, DRAG_COEFF, HEAT_COEFF, HEAT_SAFE } from './planets.js';
+import { rollPhysics, makeAtmosphere, densityAt, DRAG_COEFF, HEAT_COEFF, HEAT_SAFE, paintByClimate } from './planets.js';
+import { DebrisField } from './debris.js';
 
 export const UNIVERSE_RANGE = 200_000;
 export const NUM_PLANETS_RANGE = [1, 10];
@@ -141,19 +142,24 @@ export class Belt {
     this.maxSize = 46 * this.sizeScale;
     // always leave gaps to fly through, even inside the thickest clumps (which are denser than the rest)
     this.spacing = Math.max(this.spacing, (60 + 100 * this.sizeScale) * Math.sqrt(1 + 5 * this.clumpy));
-    const count = clamp(Math.round((width * PI2 * radius) / (this.spacing * this.spacing)), 600, 28_000);
+    const count = fixed.count ?? clamp(Math.round((width * PI2 * radius) / (this.spacing * this.spacing)), 600, 28_000);
     this.count = count;
     this.label = `${this.spacing < 200 ? 'dense' : this.spacing < 340 ? 'medium' : 'sparse'}${this.clumpy ? ', clumpy' : ''}`;
     this.phase = new Float32Array(count);
     this.r = new Float32Array(count);
     this.size = new Float32Array(count);
     this.shape = new Uint8Array(count);
+    this.gone = new Uint8Array(count); // knocked loose (now a free body in the debris field)
+    this.wakes = []; // planets whose pull bends the belt as they pass (see Universe.setupBeltPhysics)
+    this.maxWake = 0;
+    this.libMax = 0;
     this.bins = Array.from({ length: BELT_BINS }, () => []);
     const clumps = Array.from({ length: rng.int(2, 7) }, () => ({ at: rng() * PI2, sd: rng.range(0.03, 0.14) }));
     const gauss = () => (rng() + rng() + rng() - 1.5) / 1.5; // roughly -1..1, bell-shaped
     for (let i = 0; i < count; i++) {
       let ph;
-      if (rng() < this.clumpy) { const c = clumps[rng.int(0, clumps.length)]; ph = c.at + gauss() * c.sd * 2; } else ph = rng() * PI2;
+      if (fixed.phase) ph = fixed.phase(rng, gauss);
+      else if (rng() < this.clumpy) { const c = clumps[rng.int(0, clumps.length)]; ph = c.at + gauss() * c.sd * 2; } else ph = rng() * PI2;
       ph = ((ph % PI2) + PI2) % PI2;
       this.phase[i] = ph;
       this.r[i] = radius + (this.peaked ? gauss() * 0.7 : (rng() - 0.5) * 2) * (width / 2);
@@ -162,7 +168,35 @@ export class Belt {
       this.bins[Math.floor((ph / PI2) * BELT_BINS) % BELT_BINS].push(i);
     }
   }
-  angle(i, now) { return this.phase[i] + this.omega * now; }
+  angle(i, now) {
+    return this.lib ? this.phase[i] + this.omega * now + this.lib[i] * Math.sin(this.libW * now + this.libPh[i]) : this.phase[i] + this.omega * now;
+  }
+
+  /** Trojan swarms librate: each rock swings slowly back and forth about its Lagrange point. */
+  setLibration(rng, amp, w) {
+    this.lib = new Float32Array(this.count); this.libPh = new Float32Array(this.count);
+    for (let i = 0; i < this.count; i++) { this.lib[i] = amp * rng() ** 1.5; this.libPh[i] = rng() * PI2; }
+    this.libW = w; this.libMax = amp;
+  }
+
+  /** Refresh where each perturbing planet is (once per frame). */
+  updateWakes() {
+    for (const w of this.wakes) w.theta = Math.atan2(w.p.pos.y - (w.p.orbitCenter?.y ?? 0), w.p.pos.x - (w.p.orbitCenter?.x ?? 0));
+  }
+
+  /** Radius of rock i at angle a: its own orbit, bent toward any planet passing nearby. */
+  rAt(i, a) {
+    let r = this.r[i];
+    for (const w of this.wakes) {
+      let d = a - w.theta;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      // the pull peaks a little behind the planet (the rocks need time to respond), so the bulge trails it
+      const s = (d * this.radius + w.lag) / w.L;
+      if (s > 4 || s < -4) continue;
+      r += w.A * Math.exp(-s * s) * Math.sign(w.a - r) * Math.min(1, Math.abs(w.a - r) / (this.width * 0.5 + 1));
+    }
+    return r;
+  }
 }
 
 /**
@@ -318,6 +352,7 @@ export class Universe {
     this.namer = new Namer();
     this.now = LAUNCH_MECO + 1; this.dt = 0; this.frameDt = 0; this._wall = 0; // (start past the launch-gravity-off window)
     this.timeScale = 1; // below 1 near a black hole
+    this.warp = 1; // time warp: the simulation runs this many times faster (in substeps)
     this.tidal = 0; // 0..1 stress on the player's ship near a black hole
     this.planets = []; // planets first (sorted by orbit), then partners and moons
     this.anchors = []; // invisible barycentres of binary planets
@@ -341,7 +376,75 @@ export class Universe {
     this.onDestroyed = null; // (ship, { planet, speed }) => void; the player crashed
     this.onImpact = null; // ({ planet, speed, safe, damage }) => void; a hard (survivable) landing
     this.onServiced = null; // (satellite) => void; docked with a satellite
+    this.debris = new DebrisField(this);
     if (system === 'sol') this.initSol(shipModel); else this.initRandom(shipModel);
+    this.setupBeltPhysics();
+    const crng = makeRng((this.randomSeed ^ 0xc0e7) >>> 0);
+    const comets = system === 'sol' ? 1 : crng() < 0.75 ? crng.int(1, 3) : 0;
+    this.debris.makeComets(comets, `C/${(this.star.name ?? 'Sol').split(/[ .]/)[0]}`);
+  }
+
+  /**
+   * Planets shape the belts. Big worlds clear resonance gaps (rocks whose period is a simple fraction
+   * of the planet's get pumped out of line, like the Kirkwood gaps behind Jupiter), raise a travelling
+   * bulge as they pass (the belt sags toward them), and giants herd trojan swarms 60 degrees ahead of
+   * and behind themselves.
+   */
+  setupBeltPhysics() {
+    const rng = makeRng((this.randomSeed ^ 0x4b17) >>> 0);
+    const M = this.totalMass;
+    const worlds = this.planets.filter((p) => !p.isMoon && !(p.parent && p.parent.isAnchor));
+    const tops = [...this.planets.filter((p) => !p.isMoon && !(p.parent && !p.parent.isAnchor)).map((p) => (p.parent && p.parent.isAnchor ? p.parent : p))];
+    const uniq = [...new Set(tops)];
+    const massOf = (p) => (p.isAnchor ? this.planets.filter((q) => q.parent === p).reduce((s, q) => s + q.mass, 0) : p.mass);
+    for (const belt of this.belts) {
+      // resonance gaps from the heaviest world
+      const heavy = uniq.slice().sort((a, b) => massOf(b) - massOf(a))[0];
+      if (heavy) {
+        const aP = heavy.orbitRadius, inside = belt.radius < aP;
+        const ratios = inside ? [[2, 1], [3, 1], [5, 2], [7, 3], [3, 2], [5, 3]] : [[1, 2], [2, 3], [1, 3], [3, 5]];
+        const hw = clamp(belt.width * 0.035 * Math.cbrt(massOf(heavy) / M) * 3, 90, 420);
+        belt.gaps = [];
+        for (const [j, k] of ratios) {
+          const rr = aP * (k / j) ** (2 / 3);
+          if (Math.abs(rr - belt.radius) > belt.width / 2 - hw) continue;
+          belt.gaps.push(rr);
+          for (let i = 0; i < belt.count; i++) {
+            const d = belt.r[i] - rr;
+            if (Math.abs(d) < hw && rng() < 0.92) belt.r[i] = rr + Math.sign(d || 1) * (hw + rng() * hw * 0.6);
+          }
+        }
+      }
+      // travelling bulges from the nearest heavy neighbours
+      const cands = uniq.map((p) => {
+        const da = Math.abs(p.orbitRadius - belt.radius);
+        return { p, da, k: Math.cbrt(massOf(p) / (3 * M)) * p.orbitRadius / Math.max(da, 1) };
+      }).sort((a, b) => b.k - a.k).slice(0, 2);
+      for (const c of cands) {
+        if (c.k < 0.25) continue;
+        const A = Math.min(belt.width * 0.45, belt.width * 0.24 * c.k);
+        const L = clamp(c.da * 0.7, 2500, 16_000);
+        belt.wakes.push({ p: c.p, a: c.p.orbitRadius, A, L, lag: L * 0.35 * (c.p.orbitRadius < belt.radius ? 1 : -1), theta: 0 });
+        belt.maxWake += A;
+      }
+    }
+    // trojan swarms around the giants (not in our own solar system: Jupiter's are too small to see here)
+    if (this.systemId !== 'sol') {
+      for (const p of worlds) {
+        if (p.radius < 1100 || p.parent || rng() > 0.6) continue;
+        const theta0 = angleOf(sub(p.pos, p.orbitCenter)), omega = p.speed / p.orbitRadius, now0 = this.now;
+        const width = clamp(p.hill * 0.08, 1200, 4500);
+        const belt = new Belt(p.orbitRadius, width, omega, rng, {
+          spacing: 260, sizeScale: rng.range(0.6, 1.1), clumpy: 0, peaked: true,
+          count: rng.int(260, 520),
+          phase: (r, gauss) => theta0 - omega * now0 + (r() < 0.5 ? 1 : -1) * Math.PI / 3 + gauss() * 0.16,
+        });
+        belt.setLibration(rng, 0.22, rng.range(0.004, 0.009));
+        belt.trojan = p;
+        belt.label = `trojans of ${p.name}`;
+        this.belts.push(belt);
+      }
+    }    for (const b of this.belts) b.updateWakes();
   }
 
   // orbital speed around the whole system's mass
@@ -397,6 +500,7 @@ export class Universe {
     this._bodies = [...this.planets, ...this.wells];
     const prng = makeRng((this.randomSeed ^ 0xa7305) >>> 0);
     for (const p of this.planets) rollPhysics(p, prng);
+    paintByClimate(this);
     this.computeHillSpheres();
     this.satellites = this.makeSatellites();
     this.spawnAI();
@@ -821,7 +925,16 @@ export class Universe {
     this._wall = tSec;
     if (first || raw <= 0 || raw > MAX_VALID_DT) return false;
     this.frameDt = raw;
-    const dt = raw * this.timeScale; // slow motion near a black hole
+    // time warp runs extra substeps; each one stays short so orbits and collisions remain exact
+    const total = raw * this.timeScale * this.warp; // slow motion near a black hole
+    const n = Math.max(1, Math.ceil(total / (1 / 45)));
+    for (let k = 0; k < n; k++) this.advance(total / n);
+    for (const b of this.belts) b.updateWakes();
+    this.updateBlackHoleEffects(raw);
+    return true;
+  }
+
+  advance(dt) {
     this.dt = dt;
     this.now += dt;
 
@@ -856,6 +969,7 @@ export class Universe {
       }
     }
     for (const s of this.ships) if (!s.consumed) this.atmosphere(s, dt);
+    if (!ship.consumed && !ship.landing) this.scanGiants(ship, dt);
     for (const e of this.entities) e.update(this, dt);
     for (const a of this.anchors) a.update(this, dt);
     for (const p of this.planets) p.update(this, dt);
@@ -874,10 +988,9 @@ export class Universe {
     for (const s of this.sparks) s.postUpdate(this, dt);
 
     for (const sat of this.satellites) sat.update(this, dt);
+    this.debris.update(dt);
     this.sparks = this.sparks.filter((s) => !s.dead);
     this.landings = this.landings.filter((l) => !l.dead);
-    this.updateBlackHoleEffects(raw);
-    return true;
   }
 
   /**
@@ -916,6 +1029,22 @@ export class Universe {
     ship.heat = clamp(ship.heat + (over * 0.8 - (over > 0 ? 0 : 0.25)) * dt, 0, 1);
     ship.heatRate = heatRate;
     if (ship.heat >= 1) this.destroyShip(ship, ship.atmoPlanet ?? this.planets[0], mag(ship.velocity), 'burned up');
+  }
+
+  /**
+   * Scan range: passing low over a gas giant's clouds (within half a radius of the cloud tops) for a
+   * moment charts it, so even giants too heavy to dip into can be mapped with a close swing past.
+   */
+  scanGiants(ship, dt) {
+    for (const p of this.planets) {
+      if (!p.gas || p.explored) continue;
+      const alt = dist(ship.pos, p.pos) - p.radius;
+      // (binary giants are scanned from further out: their partner leaves no room to swing in close)
+      if (alt < p.atmo.top + p.radius * (p.binary ? 1.15 : 0.5)) {
+        p.scanT = (p.scanT ?? 0) + dt;
+        if (p.scanT > 0.6) this.survey(p);
+      } else p.scanT = 0;
+    }
   }
 
   // a gas giant has no surface to land on: flying through its upper air counts as visiting
@@ -990,6 +1119,7 @@ export class Universe {
         }
       }
       this.collideBelts(ship, dt);
+      this.debris.collideShip(ship, dt);
       this.dockWithSatellites(ship, dt);
     }
     for (const l of this.landings) l.solve(this, dt);
@@ -1049,14 +1179,15 @@ export class Universe {
     if (!this.belts.length) return;
     const rs = mag(pos);
     for (const belt of this.belts) {
-      if (Math.abs(rs - belt.radius) > belt.width / 2 + range + belt.maxSize) continue;
+      if (Math.abs(rs - belt.radius) > belt.width / 2 + range + belt.maxSize + belt.maxWake) continue;
       const local = (((angleOf(pos) - belt.omega * this.now) % PI2) + PI2) % PI2;
-      const margin = (range + belt.maxSize) / Math.max(rs, 1);
+      const margin = (range + belt.maxSize) / Math.max(rs, 1) + belt.libMax;
       const b0 = Math.floor(((local - margin) / PI2) * BELT_BINS);
       const b1 = Math.floor(((local + margin) / PI2) * BELT_BINS);
       for (let b = b0; b <= b1; b++) {
         for (const i of belt.bins[((b % BELT_BINS) + BELT_BINS) % BELT_BINS]) {
-          const a = belt.angle(i, this.now), r = belt.r[i];
+          if (belt.gone[i]) continue;
+          const a = belt.angle(i, this.now), r = belt.rAt(i, a);
           fn(Math.cos(a) * r, Math.sin(a) * r, belt.size[i], belt, i);
         }
       }
@@ -1083,6 +1214,13 @@ export class Universe {
       if (into < 0 && dt > 0) {
         const v = add(rock, sub(rel, mul(vec(nx, ny), 1.4 * into)));
         ship.opos = sub(ship.pos, mul(v, dt));
+        // a solid knock sends the rock tumbling out of the belt as a free body
+        if (into < -70 && !ship.isAI) {
+          belt.gone[i] = 1;
+          const kick = mul(vec(-nx, -ny), -into * 0.75);
+          this.debris.spawnRock(vec(rx, ry), add(rock, add(kick, fromAngle(this.rng() * PI2, 15))), size, belt.shape[i]);
+          if (this.onRockHit) this.onRockHit(-into);
+        }
       }
       if (ship.hitCooldown > 0) return;
       ship.hitCooldown = 0.4;

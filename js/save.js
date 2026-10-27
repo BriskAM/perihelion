@@ -9,7 +9,12 @@ const blank = () => ({
   codex: [], // full text of every discovery
   done: [], // completed mission ids
   milestones: [],
-  options: { survival: true, missions: true, assist: true, fancy: true, warp: true, strict: true, pip: true, orbit: true, pace: 1, volume: 0.6 },
+  options: {
+    survival: true, missions: true, assist: true, fancy: true, warp: true, strict: true, pip: true, orbit: true, pace: 1, volume: 0.6,
+    predict: true, smartcam: true, hop: true, autobuy: true, cruiseWarp: true, cinematic: true,
+  },
+  cruise: false, // AFK mode: the ship keeps exploring (and hopping between systems) on its own
+  stats: { systems: 0, comets: 0 },
   shipModel: 'dart',
 });
 
@@ -18,7 +23,7 @@ export function loadSave() {
     const s = JSON.parse(localStorage.getItem(KEY));
     if (s && s.v === 1) {
       const b = blank();
-      return { ...b, ...s, options: { ...b.options, ...s.options }, upgrades: { ...b.upgrades, ...s.upgrades } };
+      return { ...b, ...s, options: { ...b.options, ...s.options }, upgrades: { ...b.upgrades, ...s.upgrades }, stats: { ...b.stats, ...s.stats } };
     }
   } catch { /* storage blocked or corrupt: start fresh */ }
   return blank();
