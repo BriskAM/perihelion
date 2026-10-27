@@ -6,6 +6,7 @@ import {
 } from './universe.js';
 import { densityAt, heatSafeSpeed, DRAG_COEFF } from './planets.js';
 import { conic } from './predict.js';
+import { PERSONALITIES } from './personalities.js';
 
 const BRAKING_TIME = 5;
 const LAUNCH_THRUST_TIME = 5;
@@ -45,6 +46,7 @@ export class Autopilot {
     this.lock = 0; // 0..1
     this.lockTime = ai ? rng.range(1.2, 3) : 2.5;
     this.sightseeing = 15;
+    this.persona = PERSONALITIES.balanced; // how it likes to fly (see personalities.js)
     this.hold = 0;
     this.desiredAngle = null;
     this.landingAltitude = 0;
@@ -79,7 +81,7 @@ export class Autopilot {
     const lock = this.strategy === 'ACQUIRING' ? ` ${Math.round(this.lock * 100)}%` : '';
     return [
       '---- AUTOPILOT ENGAGED ----',
-      'TGT: ' + (this.target ? this.target.name.toUpperCase() + (this.uncharted ? ' (UNCHARTED)' : this.tour ? ' (ORBIT TOUR)' : this.relay ? ' (RELAY)' : this.wandering ? ' (REVISIT)' : '') : 'SELECTING...') +
+      'TGT: ' + (this.target ? this.target.name.toUpperCase() + (this.service ? ` (${this.target.kind === 'distress' ? 'RESCUE' : this.target.kind === 'station' ? 'DOCK' : 'RENDEZVOUS'})` : this.uncharted ? ' (UNCHARTED)' : this.tour ? ' (ORBIT TOUR)' : this.scanPass ? ' (SCAN PASS)' : this.relay ? ' (RELAY)' : this.wandering ? ' (REVISIT)' : '') : 'SELECTING...') +
         (this.via ? `  VIA ${this.via.body.name.toUpperCase()}` : ''),
       'EXE: ' + this.strategy + lock + (this.debug ? ` (${this.debug})` : ''),
     ].join('\n');
@@ -125,6 +127,16 @@ export class Autopilot {
    * cover are very unlikely. If everything is charted it wanders between planets instead.
    */
   pickTarget() {
+    // errands first (set by the game for the player's ship): a ship in distress, a station to repair
+    // and sell ore at, a comet to meet. These are rendezvous targets: match speed and drift alongside.
+    this.service = false;
+    if (!this.ai && this.serviceTarget) {
+      const s = this.serviceTarget();
+      if (s && (this.skip.get(s) ?? 0) <= this.universe.now) {
+        Object.assign(this, { service: true, uncharted: false, wandering: false, tour: false, scanPass: false, relay: false });
+        return s;
+      }
+    }
     const u = this.universe, ship = this.ship;
     const f = this.fuelState;
     const reach = (p) => !f || this.tripCost(mag(sub(p.pos, ship.pos)), p.pos) * 1.5 + 8 <= f.level;
@@ -182,7 +194,7 @@ export class Autopilot {
     }
     const weights = pool.map((p) => {
       const d = mag(sub(p.pos, ship.pos));
-      let w = (p.isMoon ? 0.6 : 1) / (1 + (d / (this.wandering ? 60_000 : 25_000)) ** 2);
+      let w = (p.isMoon ? 0.6 : 1) / (1 + (d / (this.wandering ? Math.max(60_000, this.persona.reach) : this.persona.reach)) ** 2);
       if (this.wandering) { // prefer places we have not seen in a long time
         const h = this.history.get(p);
         if (h) w *= (1 - Math.exp(-(now - h.t) / 240)) / (1 + 0.6 * h.n);
@@ -198,7 +210,7 @@ export class Autopilot {
     // with a scan pass: a close slingshot swing just above the cloud tops.
     if (pick.gas && !this.charted(pick) && !surveyable(pick)) { this.scanPass = true; return pick; }
     // wandering: often just orbit for a while and move on (gas giants get a high, safe orbit)
-    if (this.wandering && this.orbitPlan(pick, true) && (pick.gas || (this.rng ?? Math.random)() < 0.55)) {
+    if (this.wandering && this.persona.tour > 0 && this.orbitPlan(pick, true) && (pick.gas || (this.rng ?? Math.random)() < this.persona.tour)) {
       this.tour = true;
       this.tourTime = (this.rng ?? Math.random)() * 15 + 18;
     } else if (this.wandering && pick.gas) {
@@ -224,22 +236,23 @@ export class Autopilot {
       const dG = dist(s, g.pos), dGT = dist(g.pos, target.pos);
       if (dG < 6000 || dGT < 6000) continue;
       const detour = (dG + dGT) / dT;
-      if (detour > 1.45 || this.pathBlockedByStar(g)) continue;
+      if (detour > this.persona.detour || this.pathBlockedByStar(g)) continue;
       const score = g.mass / detour ** 3;
       if (score > bestScore) { best = g; bestScore = score; }
     }
     if (!best) return null;
-    const chance = this.ai ? 0.25 : this.wandering ? 0.85 : 0.5;
+    const P = this.persona;
+    const chance = this.ai ? 0.25 : this.wandering ? P.assistWander : P.assist;
     if (rnd() > chance) return null;
     const top = best.atmo ? best.atmo.top : 0;
-    return { body: best, rp: best.radius + top + Math.max(220, best.radius * 0.3), phase: 'approach', since: u.now, vInf: 800 + rnd() * 350 };
+    return { body: best, rp: best.radius + top + Math.max(this.ai ? 220 : 120, best.radius * (this.ai ? 0.3 : P.passAlt)), phase: 'approach', since: u.now, vInf: this.ai ? 800 + rnd() * 350 : P.vInf[0] + rnd() * (P.vInf[1] - P.vInf[0]) };
   }
 
   /** A scan pass: swing past the target giant itself, low over the clouds. */
   scanVia(target) {
     const top = target.atmo ? target.atmo.top : 0;
     // a binary partner is close by: pass wider, and on the far side from it
-    const rp = target.radius + top + Math.max(200, target.radius * (target.binary ? 0.9 : 0.22));
+    const rp = target.radius + top + Math.max(this.ai ? 200 : 110, target.radius * (target.binary ? 0.9 : this.ai ? 0.22 : this.persona.scanDepth));
     return { body: target, scan: true, rp, phase: 'approach', since: this.universe.now, vInf: 1000, away: target.binary ?? null };
   }
 
@@ -248,7 +261,7 @@ export class Autopilot {
     if (skipFor) this.skip.set(target, this.universe.now + skipFor);
     else { this.remember(target); this.visited.add(target); }
     this.lastTarget = target;
-    this.target = null; this.via = null; this.tour = false; this.scanPass = false;
+    this.target = null; this.via = null; this.tour = false; this.scanPass = false; this.service = false;
     this.orbitPhase = null; this.lock = 0;
   }
 
@@ -283,7 +296,7 @@ export class Autopilot {
         const route = this.routeAroundWells(ship, aim, g);
         const dir = unit(route ?? aim);
         // arrive slowly: the slower the approach, the harder the world bends the path
-        let speed = Math.min(Math.sqrt(2 * 380 * Math.max(0, d - coastR)) + v.vInf, 2400, this.beltSpeedCap(ship, aim));
+        let speed = Math.min(Math.sqrt(2 * 380 * Math.max(0, d - coastR)) + v.vInf, 2400 * Math.max(1, this.persona.speed), this.beltSpeedCap(ship, aim) * this.persona.beltNerve);
         const push = this.avoidance(ship, aim, g);
         if (this.avoidActive) speed = Math.min(speed, 1800);
         this.burnToward(ship, add(mul(dir, speed), mul(push, 0.9 * speed)), relV, 300);
@@ -578,7 +591,8 @@ export class Autopilot {
     // moons sweep through at hundreds of units a second: be slow while crossing a planet's moon swarm
     const zone = this.moonZone(target);
     if (zone) approach = Math.min(approach, Math.sqrt(2 * 600 * Math.max(0, mag(targetVector) - zone)) + 300);
-    approach = Math.min(Math.min(0.9, 0.72 * (0.85 + 0.15 * this.pace)) * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, aim), approach);
+    const top = Math.min(0.96, Math.min(0.9, 0.72 * (0.85 + 0.15 * this.pace)) * this.persona.speed); // the personality's cruising speed
+    approach = Math.min(top * CRAFT_SPEED_LIMIT, this.beltSpeedCap(ship, aim) * this.persona.beltNerve, approach);
     const push = this.avoidance(ship, aim, target);
     if (this.avoidActive || route) approach = Math.min(approach, route ? 2200 : 1800); // stay agile enough to steer around the obstacle
     const desired = add(mul(dir, approach), mul(push, 0.9 * approach));
@@ -758,7 +772,7 @@ export class Autopilot {
       if (this.target) ship.thrust = vec();
       if (gated) return;
       this.desiredAngle = null;
-      if (this.target) {
+      if (this.target && !this.target.isRendezvous) { // (touching down somewhere on an errand is not arriving)
         // just arrived: see the sights
         this.strategy = 'LANDED';
         this.debug = '';
@@ -772,6 +786,10 @@ export class Autopilot {
         this.lock = 0;
         this.landingAltitude = 0;
         this.nextStrategyTime = sim.now + (this.ai ? this.rng.range(8, 25) : this.sightseeing / this.pace);
+      } else if (this.repairing?.()) {
+        this.strategy = 'REPAIRING'; // patch the hull before lifting off
+        this.debug = '';
+        this.nextStrategyTime = sim.now + 0.5;
       } else if (this.fuelState && this.fuelState.level < 0.9 * this.fuelState.capacity) {
         this.strategy = 'REFUELLING'; // wait for a full tank before lifting off
         this.debug = `${Math.round((this.fuelState.level / this.fuelState.capacity) * 100)}%`;

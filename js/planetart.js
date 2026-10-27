@@ -275,6 +275,23 @@ export function drawPlanetBody(ctx, p, view, px, showTex, color, voidColor, now 
         ctx.fillStyle = tint(color, 0.22 * texA);
         ctx.beginPath(); ctx.ellipse(v.storm.x, v.storm.y, v.storm.r, v.storm.r * 0.6, 0, 0, PI2); ctx.fill();
       }
+      if (p.storm?.on) { // an active storm: a churning bright spiral with lightning in it
+        const st = p.storm, sx = Math.cos(st.a) * 0.45, sy = Math.sin(st.a) * 0.45;
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(now * 0.6);
+        ctx.strokeStyle = tint(color, 0.8); ctx.lineWidth = (1.6 * px) / R;
+        ctx.beginPath();
+        for (let t = 0; t <= 50; t++) { const r = (t / 50) * st.size, th = t * 0.35; if (t === 0) ctx.moveTo(0, 0); else ctx.lineTo(Math.cos(th) * r, Math.sin(th) * r * 0.7); }
+        ctx.stroke();
+        if (Math.random() < 0.18) {
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.fillStyle = 'rgba(220,235,255,0.75)';
+          ctx.beginPath(); ctx.arc((Math.random() - 0.5) * st.size, (Math.random() - 0.5) * st.size * 0.6, st.size * 0.35, 0, PI2); ctx.fill();
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        ctx.restore();
+      }
       ctx.strokeStyle = color;
       ctx.lineWidth = px / R;
       ctx.globalAlpha = texA;

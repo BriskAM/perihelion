@@ -10,11 +10,12 @@ import { GRAVITATION, SPACECRAFT_MASS } from './universe.js';
 // read lazily: autopilot.js imports this module while universe.js is still loading
 const gconst = () => GRAVITATION * SPACECRAFT_MASS;
 
-/** Position of a rail body `t` seconds from now. */
-export function bodyPosAt(b, t) {
+/** Position of a rail body `t` seconds from now (`now` is the current sim time). */
+export function bodyPosAt(b, t, now = 0) {
+  if (b.rail) return b.posAt(now + t);
   if (!b.speed || !b.orbitRadius) return b.pos;
   const cNow = b.orbitCenter;
-  const cAt = b.parent ? bodyPosAt(b.parent, t) : cNow;
+  const cAt = b.parent ? bodyPosAt(b.parent, t, now) : cNow;
   const a = Math.atan2(b.pos.y - cNow.y, b.pos.x - cNow.x) + (b.speed / b.orbitRadius) * t;
   return { x: cAt.x + Math.cos(a) * b.orbitRadius, y: cAt.y + Math.sin(a) * b.orbitRadius };
 }
@@ -102,7 +103,7 @@ export function predict(u, ship, { steps = 420, horizon = 420 } = {}) {
   for (let i = 0; i < steps && t < horizon; i++) {
     let ax = 0, ay = 0, dNear = Infinity;
     for (let k = 0; k < bodies.length; k++) {
-      const b = bodies[k], bp = (pos[k] = bodyPosAt(b, t));
+      const b = bodies[k], bp = (pos[k] = bodyPosAt(b, t, u.now));
       const dx = bp.x - x, dy = bp.y - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
       if (d < b.radius) {
         if (b.isBlackHole || b.collides || (b.gas && d < b.radius * 0.6) || u.stars.includes(b)) { impact = { x, y, body: b, t }; break; }
@@ -121,11 +122,11 @@ export function predict(u, ship, { steps = 420, horizon = 420 } = {}) {
     // entering a sphere of influence: hand over to that world's conic
     for (const p of u.planets) {
       if (!p.hill || p.isMoon) continue;
-      const pp = bodyPosAt(p, t);
+      const pp = bodyPosAt(p, t, u.now);
       const d = Math.hypot(x - pp.x, y - pp.y);
       if (!closest || d - p.radius < closest.d) closest = { body: p, d: d - p.radius, t, ghost: pp };
       if (d < p.hill * 0.95) {
-        const p2 = bodyPosAt(p, t + 0.05);
+        const p2 = bodyPosAt(p, t + 0.05, u.now);
         const pvx = (p2.x - pp.x) / 0.05, pvy = (p2.y - pp.y) / 0.05;
         const orbit = conic(p, x - pp.x, y - pp.y, vx - pvx, vy - pvy);
         encounter = { body: p, t, ghost: pp, orbit };

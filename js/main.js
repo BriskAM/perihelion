@@ -13,6 +13,10 @@ import { makeDesign } from './ships.js';
 import { Sound } from './audio.js';
 import { Camera } from './camera.js';
 import { predict } from './predict.js';
+import { WorldEvents, HULL } from './events.js';
+import { takePostcard, loadPostcards } from './postcards.js';
+import { checkAchievements, ACHIEVEMENTS } from './achievements.js';
+import { persona, PERSONALITIES, PERSONALITY_IDS } from './personalities.js';
 
 const STICK_MIN = 50, STICK_MAX = 100;
 const MANUAL_TURN = 9; // rad/s: the hull swings round quickly, but you see it turn
@@ -44,6 +48,7 @@ const game = {
   get universe() { return universe; },
   get missions() { return missions; },
   get seed() { return system === 'sol' ? 'Sol, our solar system' : seed; },
+  get here() { return { seed, system }; },
 };
 
 // log of things that happened (shown in the floating window and the "while you were away" card)
@@ -64,12 +69,14 @@ const ui = createUI({
       state.options[key] = value; applyShip(); persist(); ui.render();
     },
     cruise(on) { setCruise(on); ui.render(); },
+    persona(id) { setPersona(id); ui.render(); },
     share() {
       const url = `${location.origin}${location.pathname}${system ? '?system=sol' : `?seed=${seed}`}`;
       if (navigator.share) navigator.share({ title: 'Perihelion', url }).catch(() => {});
       else navigator.clipboard?.writeText(url).then(() => ui.toast('Link copied')).catch(() => ui.toast(url));
     },
     randomSeed() { jumpTo(1 + Math.floor(Math.random() * 9_999_999), null); ui.toggle(false); },
+    travel(s, sys) { jumpTo(s, sys ?? null); ui.toggle(false); },
     dailySeed() { location.search = ''; },
     sol() { jumpTo(SOL_SEED, 'sol'); ui.toggle(false); },
     reset() { resetSave(); location.reload(); },
@@ -94,8 +101,13 @@ function buyUpgrade(id) {
 
 function applyShip() {
   autopilot.assist = state.options.assist;
-  autopilot.orbitFirst = state.options.orbit;
-  autopilot.pace = state.options.pace;
+  const P = persona(state.options.persona);
+  autopilot.persona = P;
+  autopilot.orbitFirst = P.orbitFirst ?? state.options.orbit;
+  autopilot.pace = state.options.pace * P.pace;
+  autopilot.lockTime = 2.5 * P.lock;
+  autopilot.sightseeing = 15 * P.dwell;
+  cam.style = P; pipCam.style = P;
   sound.setVolume(state.options.volume);
   if (state.options.volume > 0 && soundStarted) sound.setPad(universe.star.cls, !!universe.star.isBlackHole);
   universe.style.fancy = state.options.fancy;
@@ -115,19 +127,46 @@ function buildSystem(newSeed, newSystem) {
   universe.ship.autopilot = autopilot;
   universe.entities.push(autopilot);
   autopilot.onEvent = (e) => {
+    if (e.kind === 'assist' || e.kind === 'scan') {
+      state.counts.slingshots++; score.slings++;
+      state.counts.bestTurn = Math.max(state.counts.bestTurn, Math.round(e.turn));
+      postcard({ focus: universe.ship.pos, other: e.body, caption: `${e.kind === 'scan' ? 'Scan pass' : 'Slingshot'} round ${e.body.name}`, sub: `turned ${Math.round(e.turn)}°, closest ${Math.round(e.pe)} above the surface` });
+    }
     if (e.kind === 'assist') {
       const gain = Math.round(e.gain);
       ui.toast(`SLINGSHOT ${e.body.name.toUpperCase()}: turned ${Math.round(e.turn)}°, ${gain >= 0 ? `+${gain} speed` : `${-gain} slower`}, closest pass ${Math.round(e.pe)}`, gain > 0 ? 'good' : '');
       logEvent(`Slingshot round ${e.body.name}: ${gain >= 0 ? '+' : ''}${gain} speed`);
       cam.addTrauma(0.15);
     } else if (e.kind === 'scan') {
-      logEvent(`Scan pass over ${e.body.name}, turned ${Math.round(e.turn)}°`);
+      // the deeper the pass, the better the data; storms double it
+      const top = e.body.atmo ? e.body.atmo.top : 0, depth = clamp(1 - (e.pe - top) / (e.body.radius * 0.5), 0, 1);
+      const storm = e.body.storm?.on;
+      const bonus = Math.round((40 + 160 * depth) * (storm ? 2 : 1));
+      state.credits += bonus; state.counts.scans++; if (storm) state.counts.stormScans++;
+      ui.toast(`SCAN DATA FROM ${e.body.name.toUpperCase()}: ${Math.round(depth * 100)}% depth${storm ? ', STORM' : ''}  +${bonus} CR`, 'good');
+      logEvent(`Scan pass over ${e.body.name}: +${bonus} CR`);
+      persist();
     } else if (e.kind === 'tour') {
+      state.counts.tours++;
       logEvent(`Orbit tour of ${e.body.name}`);
     }
   };
   universe.orbitHeld = {};
   universe.cometsMet = new Set();
+  universe.events = new WorldEvents(universe);
+  universe.events.onEvent = onWorldEvent;
+  autopilot.serviceTarget = serviceTarget;
+  autopilot.repairing = () => state.hull < 85;
+  // the galaxy log: every system visited, in order
+  let entry = state.galaxy.find((g) => g.seed === seed && (g.system ?? null) === system);
+  if (!entry) {
+    entry = { seed, system, name: universe.star.name, cls: universe.stars.map((s) => (s.isBlackHole ? 'BH' : s.cls)).join('+'), charted: 0, total: universe.planets.length, t: Date.now() };
+    state.galaxy.push(entry);
+    if (state.galaxy.length > 200) state.galaxy.shift();
+    if (universe.blackHoles.length) state.counts.blackHoleSystems++;
+    if (universe.systemType === 'binary') state.counts.binarySystems++;
+  }
+  entry.charted = universe.planets.filter((p) => p.explored).length;
   for (const idx of state.explored[seedKey] ?? []) {
     if (universe.planets[idx]) universe.planets[idx].explored = true;
   }
@@ -137,7 +176,7 @@ function buildSystem(newSeed, newSystem) {
   universe.fuel.level = universe.fuel.capacity;
   nearShips.clear();
   pred = null;
-  lastDiscovery = performance.now();
+  lastDiscovery = universe.now;
   allChartedAt = 0; wanderingSince = 0;
   if (soundStarted) sound.setPad(universe.star.cls, !!universe.star.isBlackHole);
   cam.snap(universe, w, h); pipCam.snap(universe, 340, 340);
@@ -150,6 +189,9 @@ function wire(u) {
     if (first && !rescue) sound.discover(planet.name); else if (!rescue) sound.touchdown();
     if (!rescue) cam.addTrauma(first ? 0.25 : 0.12);
     if (!first || rescue) return;
+    postcard({ focus: u.ship.pos, other: planet, caption: `${survey ? 'Surveyed' : 'Charted'} ${planet.name}`, sub: `${cap(planet.description)}${planet.climate ? ` · ${planet.climate}` : ''}` });
+    const g = state.galaxy.find((e) => e.seed === seed && (e.system ?? null) === system);
+    if (g) g.charted = u.planets.filter((p) => p.explored).length;
     // a pulse rolls out from the newly charted world
     const ring = new Spark({ ttl: 2.6, style: 'ring', color: planet.color, size: Math.log(planet.radius * 2.5) });
     ring.pos = ring.opos = { ...planet.pos }; ring.velocity = planet.velocity;
@@ -161,8 +203,8 @@ function wire(u) {
       fauna: planet.fauna, flora: planet.flora, t: Date.now(),
     });
     state.credits += 50;
-    lastDiscovery = performance.now();
-    away.charted++;
+    lastDiscovery = u.now;
+    away.charted++; score.charted++;
     ui.toast(`${survey ? 'SURVEYED' : 'DISCOVERED'} ${planet.name.toUpperCase()}  +50 CR`);
     logEvent(`${survey ? 'Surveyed' : 'Charted'} ${planet.name}`);
     for (const [count, title] of MILESTONES) {
@@ -184,16 +226,42 @@ function wire(u) {
   };
   u.onServiced = (sat) => {
     sound.dock();
-    state.credits += 10;
-    ui.toast(`DOCKED WITH ${sat.name.toUpperCase()}: +10 CR${u.fuel.on ? ', +15 fuel' : ''}`, 'good');
+    const price = sat.isStation ? 8 : 4, ore = state.cargo, sale = ore * price;
+    state.credits += 10 + sale; state.cargo = 0; state.counts.oreSold += ore;
+    if (sat.isStation) { // full service
+      if (u.fuel.on) u.fuel.level = u.fuel.capacity;
+      state.hull = 100; state.counts.stationDocks++;
+      ui.toast(`DOCKED AT ${sat.name.toUpperCase()}: refuelled, repaired${ore ? `, sold ${ore} ore +${sale} CR` : ''}`, 'good');
+      logEvent(`Docked at ${sat.name}`);
+      if (state.counts.stationDocks === 1) postcard({ focus: u.ship.pos, other: sat, caption: `Docked at ${sat.name}`, sub: universe.star.name });
+    } else {
+      state.hull = Math.min(100, state.hull + 20);
+      ui.toast(`DOCKED WITH ${sat.name.toUpperCase()}: +10 CR${u.fuel.on ? ', +15 fuel' : ''}, hull +20${ore ? `, sold ${ore} ore +${sale} CR` : ''}`, 'good');
+    }
+    if (autopilot.target?.src === sat) autopilot.leave(autopilot.target);
     persist();
+  };
+  // mining: a slow touch scoops a rock into the hold (bigger rocks give more ore)
+  u.onMine = (size) => {
+    const room = shipStats(state).cargoMax - state.cargo;
+    if (room <= 0) return false;
+    const ore = Math.min(room, Math.max(1, Math.round(size / 9)));
+    state.cargo += ore; dirty = true;
+    sound.lockTick(0.8);
+    if (state.cargo >= shipStats(state).cargoMax) ui.toast('HOLD FULL: sell ore at a station or satellite');
+    return true;
+  };
+  u.onRockHit = (speed) => {
+    cam.addTrauma(Math.min(0.45, speed / 700));
+    if (speed > 200) { sound.thud(); buzz(20); }
+    damageHull(HULL.rock(speed), 'rock');
   };
   u.onImpact = ({ planet, speed, safe, damage }) => {
     sound.thud(); cam.addTrauma(0.55); buzz(40);
+    damageHull(HULL.impact(damage), 'impact', planet);
     ui.toast(`HARD LANDING on ${planet.name.toUpperCase()}: ${Math.round(speed)} (limit ${Math.round(safe)})` +
       (u.fuel.on ? `  -${Math.round(damage)} fuel` : ''), 'bad');
   };
-  u.onRockHit = (speed) => { cam.addTrauma(Math.min(0.45, speed / 700)); if (speed > 200) { sound.thud(); buzz(20); } };
   u.debris.onEvent = ({ kind, item, body, at }) => {
     if (kind === 'comet') { ui.toast(`NEW COMET INBOUND: ${item.name}`); logEvent(`Comet ${item.name} falling in`); return; }
     const d = dist(at, u.ship.pos);
@@ -201,11 +269,101 @@ function wire(u) {
     if (item.kind === 'comet') {
       ui.toast(`COMET ${item.name} HIT ${body.name.toUpperCase()}`, 'bad');
       logEvent(`Comet ${item.name} struck ${body.name}`);
+      if (d < 60_000) { state.counts.cometStrikes++; postcard({ focus: at, other: body, caption: `Comet ${item.name} strikes ${body.name}`, sub: universe.star.name, force: true }); }
     }
   };
 }
 
 function buzz(p) { try { navigator.vibrate?.(p); } catch { /* not allowed */ } }
+
+// ---- hull ----
+function damageHull(amount, why, planet = null) {
+  if (!(amount > 0) || universe.ship.consumed) return;
+  state.hull = Math.max(0, state.hull - amount * shipStats(state).armor);
+  dirty = true;
+  if (state.hull <= 0) {
+    state.hull = 100; // a fresh hull for the respawn
+    const p = planet ?? universe.closestPlanet();
+    universe.destroyShip(universe.ship, p, mag(universe.ship.velocity), 'hull failure');
+  }
+}
+
+// ---- postcards: at most one every 25 s unless it is a big moment ----
+let lastCard = 0, newCards = 0;
+function postcard(opts) {
+  const now = performance.now();
+  if (!opts.force && now - lastCard < 25_000) return;
+  lastCard = now;
+  try { takePostcard(universe, opts); } catch (e) { console.warn('postcard failed', e); return; }
+  state.counts.postcards++; newCards++;
+  flashPip();
+}
+
+// ---- errands for the autopilot: rescues, station visits, comet meetings ----
+const wrappers = new WeakMap();
+function rendezvous(src, kind) {
+  let w = wrappers.get(src);
+  if (w) return w;
+  w = {
+    isRendezvous: true, kind, src, mass: 0, explored: true,
+    name: kind === 'comet' ? `COMET ${src.name}` : src.name,
+    radius: kind === 'station' ? 26 : kind === 'comet' ? src.size : 12,
+    get pos() { return src.pos; }, get velocity() { return src.velocity ?? src.vel; },
+  };
+  wrappers.set(src, w);
+  return w;
+}
+// somewhere you cannot follow: inside (or just above) a gas giant's air
+const inGiantAir = (u, pos) => u.planets.some((p) => p.gas && dist(p.pos, pos) < p.radius + p.atmo.top * 1.3 + 300);
+function serviceTarget() {
+  const u = universe, ship = u.ship, f = u.fuel;
+  const near = (list, max) => list.filter((x) => dist(x.pos, ship.pos) < max).sort((a, b) => dist(a.pos, ship.pos) - dist(b.pos, ship.pos))[0];
+  const sos = near(u.ships.filter((s) => s.distress && !inGiantAir(u, s.pos)), 70_000);
+  if (sos) return rendezvous(sos, 'distress');
+  const max = shipStats(state).cargoMax;
+  const needs = state.hull < 45 || state.cargo >= max * 0.8 || (f.on && f.level < 0.3 * f.capacity);
+  const st = needs ? near(u.stations ?? [], 90_000) : null;
+  if (st) return rendezvous(st, 'station');
+  if (state.cruise && Math.random() < persona(state.options.persona).comet) {
+    const c = near(u.debris.items.filter((it) => it.kind === 'comet' && !u.cometsMet.has(it.name)), 45_000);
+    if (c) return rendezvous(c, 'comet');
+  }
+  return null;
+}
+
+// ---- world events: storms, eruptions, distress calls ----
+function onWorldEvent(e) {
+  const u = universe, ship = u.ship;
+  if (e.kind === 'storm') {
+    if (dist(e.body.pos, ship.pos) < 60_000) { // (far-off weather is not news)
+      ui.toast(`STORM BREWING ON ${e.body.name.toUpperCase()}: scans pay double`);
+      logEvent(`Storm on ${e.body.name}`);
+    }
+  } else if (e.kind === 'eruption') {
+    const d = dist(e.at, ship.pos);
+    if (d < 25_000) {
+      ui.toast(`ERUPTION ON ${e.body.name.toUpperCase()}`, 'bad');
+      cam.addTrauma(clamp(0.4 * (1 - d / 25_000), 0, 0.4));
+      state.counts.eruptionsSeen++;
+      postcard({ focus: e.at, other: e.body, caption: `Eruption on ${e.body.name}`, sub: u.star.name });
+      logEvent(`Eruption on ${e.body.name}`);
+    }
+  } else if (e.kind === 'distress') {
+    ui.toast(`MAYDAY: ${e.ship.name} (${e.ship.role}) adrift near ${e.near.name.toUpperCase()}. Match speed to tow it: +150 CR`, 'bad');
+    logEvent(`Mayday from ${e.ship.name}`);
+    sound.lockTick(0.2);
+  } else if (e.kind === 'rescued') {
+    state.credits += 150; state.counts.rescues++;
+    ui.toast(`RESCUED ${e.ship.name.toUpperCase()}  +150 CR`, 'good'); sound.fanfare();
+    logEvent(`Rescued ${e.ship.name}`);
+    postcard({ focus: ship.pos, other: e.ship, caption: `Rescued ${e.ship.name}`, sub: u.star.name, force: true });
+    if (autopilot.target?.src === e.ship) autopilot.leave(autopilot.target);
+    persist();
+  } else if (e.kind === 'lost') {
+    logEvent(`Lost contact with ${e.ship.name}`);
+    if (autopilot.target?.src === e.ship) autopilot.leave(autopilot.target, 60);
+  }
+}
 
 // ---- AI ships: announce when one comes close ----
 const nearShips = new Set();
@@ -294,7 +452,7 @@ window.addEventListener('resize', resize);
 resize();
 
 // ---- start ----
-let lastDiscovery = performance.now(), allChartedAt = 0, wanderingSince = 0;
+let lastDiscovery = 0, allChartedAt = 0, wanderingSince = 0; // (sim time, so warp counts properly)
 const away = { charted: 0, missions: 0, systems: 0, credits: state.credits, since: 0 };
 {
   const sys = params.get('system') === 'sol' ? 'sol' : null;
@@ -361,7 +519,7 @@ let pinch = null;
 const pos = (e) => vec(e.clientX, e.clientY);
 canvas.addEventListener('pointerdown', (e) => {
   pointers.set(e.pointerId, pos(e));
-  canvas.setPointerCapture(e.pointerId);
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or already-released pointer */ }
   if (pointers.size === 2) { // second finger: pinch to zoom instead of flying
     stick.active = false; stick.vec = null;
     const [a, b] = [...pointers.values()];
@@ -411,6 +569,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '-' || e.key === '_') cam.nudgeZoom(-0.35);
   if (e.key === '0') cam.resetZoom();
   if (e.key === 'v' || e.key === 'V') { cam.shot = null; pipCam.shot = null; } // next cinematic shot
+  if (e.key === 'k' || e.key === 'K') setPersona(PERSONALITY_IDS[(PERSONALITY_IDS.indexOf(state.options.persona) + 1) % PERSONALITY_IDS.length]);
   if (e.key === 'Escape' && ui.open) ui.toggle(false);
 });
 window.addEventListener('keyup', (e) => {
@@ -421,8 +580,26 @@ window.addEventListener('keyup', (e) => {
 
 const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 /** Turn the player's inputs into heading and thrust. Returns true while the pilot is flying. */
+let ghostBurn = null, ghostPred = null;
+
+// ---- personalities: switch with K, and a running scoreboard to compare them ----
+const score = { t: 0, charted: 0, fuel: 0, slings: 0, lastFuel: null };
+function resetScore() { Object.assign(score, { t: 0, charted: 0, fuel: 0, slings: 0, lastFuel: null }); }
+function setPersona(id) {
+  state.options.persona = id;
+  applyShip(); resetScore(); persist();
+  const P = persona(id);
+  ui.toast(`AUTOPILOT STYLE: ${P.name.toUpperCase()}. ${P.desc}`);
+  logEvent(`Style: ${P.name}`);
+}
+function scoreLine() {
+  const P = persona(state.options.persona), hrs = score.t / 3600;
+  if (score.t < 30) return `STYLE: ${P.name.toUpperCase()}`;
+  return `STYLE: ${P.name.toUpperCase()}  ${(score.charted / hrs).toFixed(0)} worlds/h  ${score.charted ? (score.fuel / score.charted).toFixed(1) : '-'} fuel/world  ${score.slings} slings`;
+}
 function pilot(dt) {
   const ship = universe.ship;
+  ghostBurn = null;
   const flyingKeys = ['ArrowUp', 'ArrowLeft', 'ArrowRight', 'ArrowDown', 'w', 's', 'd', 'q'].some((k) => keys.has(k));
   if (stick.active && stick.vec) {
     const m = mag(stick.vec), want = angleOf(stick.vec);
@@ -432,6 +609,8 @@ function pilot(dt) {
     } else ship.angle = want;
     const off = Math.abs(wrapA(want - ship.angle));
     const power = m < STICK_MIN ? 0 : clamp((m - STICK_MIN) / (STICK_MAX - STICK_MIN), 0, 1);
+    // inside the dead zone the stick previews a burn instead: where would a push this way take you?
+    ghostBurn = m > 14 && m < STICK_MIN && !ship.landing ? { dir: want, dv: 1100 * (m / STICK_MIN) } : null;
     ship.thrust = fromAngle(ship.angle, power * Math.max(0, Math.cos(off)) ** 2); // no shove the wrong way mid-flip
     return true;
   }
@@ -550,13 +729,14 @@ function updateHud() {
     cometLine,
     holeLine,
     fuelLine,
+    `HULL: ${Math.round(state.hull)}%${state.hull < 35 ? '  !! DAMAGED !!' : ''}   HOLD: ${state.cargo}/${shipStats(state).cargoMax}`,
     `CR:  ${state.credits}`,
     `THR: ${Math.round(mag(ship.thrust) * 100)}%${u.warp > 1 ? `   WARP x${u.warp}` : requestedWarp > 1 ? `   WARP x${requestedWarp} (held: too close)` : ''}`,
     `POS: <${signed(ship.pos.x)},${signed(ship.pos.y)}>`,
     `VEL: ${Math.round(mag(ship.velocity))}`,
   ].filter((x) => x !== null).join('\n');
   if (hudShip.textContent !== text) hudShip.textContent = text;
-  const at = autopilot.telemetry;
+  const at = autopilot.enabled ? `${autopilot.telemetry}\n${scoreLine()}` : '';
   if (hudAuto.textContent !== at) hudAuto.textContent = at;
   warpBtn.textContent = `x${u.warp > 1 ? u.warp : requestedWarp}`;
   warpBtn.classList.toggle('on', u.warp > 1);
@@ -729,6 +909,18 @@ function closePip() {
   Object.assign(pipWin, { win: null, canvas: null, ctx: null, video: null, kind: null, el: {} });
 }
 document.getElementById('pipbtn').addEventListener('click', openPip);
+
+// a camera flash in the floating window when a postcard is taken
+function flashPip() {
+  sound.lockTick(1);
+  const doc = pipWin.win?.document;
+  if (!doc) return;
+  const f = doc.createElement('div');
+  f.style.cssText = 'position:fixed;inset:0;background:#fff;opacity:.55;transition:opacity .6s;pointer-events:none';
+  doc.body.append(f);
+  setTimeout(() => { f.style.opacity = '0'; }, 40);
+  setTimeout(() => f.remove(), 700);
+}
 document.getElementById('pipbtn').addEventListener('pointerdown', (e) => e.stopPropagation());
 
 let pipHudClock = 0;
@@ -748,7 +940,7 @@ function drawFloating(frameDt) {
     el.bar.style.width = `${Math.round((charted / u.planets.length) * 100)}%`;
     set(el.charted, `${charted}/${u.planets.length} charted${state.stats.systems ? `  ·  system ${state.stats.systems + 1}` : ''}`);
     set(el.cr, `${state.credits} CR`);
-    set(el.s, jump ? 'JUMPING TO A NEW SYSTEM' : `${autopilot.strategy}${tgt ? ' > ' + tgt.name.toUpperCase() : ''}`);
+    set(el.s, jump ? 'JUMPING TO A NEW SYSTEM' : `${persona(state.options.persona).name.toUpperCase()} · ${autopilot.strategy}${tgt ? ' > ' + tgt.name.toUpperCase() : ''}`);
     el.fuel.style.width = `${Math.round((u.fuel.level / u.fuel.capacity) * 100)}%`;
     set(el.warp, `x${u.warp}`);
     set(el.shot, pipCam.shotName.toUpperCase());
@@ -793,6 +985,7 @@ function updateJump(dt) {
     persist();
     ui.render();
     showTitle();
+    setTimeout(() => postcard({ focus: universe.star.pos, other: universe.ship.pos, caption: `Arrived at ${universe.star.name}`, sub: `${universe.planets.length} bodies · ${universe.profile.name}`, force: true }), 1500);
     logEvent(`Arrived at ${universe.star.name}`);
     void visited;
   }
@@ -838,13 +1031,16 @@ function cruiseThink(dt) {
   } else strandedFor = 0;
   if (!state.options.hop) return;
   const all = u.planets.every((p) => p.explored);
-  if (all && !allChartedAt) allChartedAt = performance.now();
+  if (all && !allChartedAt) allChartedAt = u.now;
   // wandering = nothing new in reach: give it a minute of tours and slingshots, then move on
-  if (autopilot.wandering && !wanderingSince) wanderingSince = performance.now();
+  if (autopilot.wandering && !wanderingSince) wanderingSince = u.now;
   if (!autopilot.wandering) wanderingSince = 0;
-  const bored = wanderingSince && performance.now() - wanderingSince > 75_000 / Math.max(1, u.warp / 2) && !autopilot.via;
-  const doneHere = ((all && performance.now() - allChartedAt > 25_000) || bored) && !u.ship.landing;
-  const stale = performance.now() - lastDiscovery > 8 * 60_000 / Math.max(1, u.warp);
+  const patience = persona(state.options.persona).patience;
+  const bored = wanderingSince && u.now - wanderingSince > 150 * patience && !autopilot.via;
+  const doneHere = ((all && u.now - allChartedAt > 40 * patience) || bored) && !u.ship.landing;
+  const stale = u.now - lastDiscovery > 600 * patience;
+  // never leave in the middle of an errand, or with someone calling for help
+  if (autopilot.service || u.ships.some((sh) => sh.distress)) return;
   if (doneHere || stale) jumpTo(1 + Math.floor(Math.random() * 9_999_999));
 }
 
@@ -858,13 +1054,14 @@ function showAway() {
     ...(away.systems ? [`${away.systems} new system${away.systems === 1 ? '' : 's'}`] : []),
     ...(away.missions ? [`${away.missions} mission${away.missions === 1 ? '' : 's'} done`] : []),
     `${gained >= 0 ? '+' : ''}${gained} CR`,
+    ...(newCards ? [`${newCards} new postcard${newCards === 1 ? '' : 's'} (MENU > POSTCARDS)`] : []),
   ];
   awayCard.replaceChildren(...lines.map((t, i) => { const d = document.createElement('div'); if (!i) d.className = 'head'; d.textContent = t; return d; }));
   awayCard.hidden = false;
   setTimeout(() => { awayCard.hidden = true; }, 9000);
 }
 awayCard.addEventListener('pointerdown', (e) => { e.stopPropagation(); awayCard.hidden = true; });
-function resetAway() { Object.assign(away, { charted: 0, missions: 0, systems: 0, credits: state.credits, since: Date.now() }); }
+function resetAway() { Object.assign(away, { charted: 0, missions: 0, systems: 0, credits: state.credits, since: Date.now() }); newCards = 0; }
 resetAway();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
@@ -873,13 +1070,14 @@ document.addEventListener('visibilitychange', () => {
   } else {
     if (!pipWin.active) stopTicker();
     if (state.cruise) holdWake(true);
-    if (Date.now() - away.since > 45_000 && (away.charted || away.systems || away.missions)) showAway();
+    if (Date.now() - away.since > 45_000 && (away.charted || away.systems || away.missions || newCards)) showAway();
     lastMs = performance.now(); // do not count the hidden time as one huge frame
   }
 });
 
 // ---- the frame ----
 let hudClock = 1000, lastMs = 0, missionClock = 0, lastManual = 0, lockBucket = 0, predClock = 0;
+let forceRender = false; // debug: paint even when the page is hidden (see __game.run)
 function tick(ms) {
   if (ms - lastMs < 8) return; // the page and the worker can both call this; only run once per frame
   const u = universe;
@@ -890,7 +1088,8 @@ function tick(ms) {
 
   // warp: what you asked for, capped by what is safe; cruise picks its own on long coasts
   let wantWarp = requestedWarp;
-  if (state.cruise && state.options.cruiseWarp && !manual) wantWarp = Math.max(wantWarp, u.ship.landing ? 4 : 8);
+  const P = persona(state.options.persona);
+  if (state.cruise && state.options.cruiseWarp && !manual) wantWarp = Math.max(wantWarp, u.ship.landing ? Math.min(4, P.warp) : P.warp);
   if (manual) wantWarp = Math.min(wantWarp, mag(u.ship.thrust) > 0 ? 1 : wantWarp);
   u.warp = Math.min(wantWarp, warpCeiling());
 
@@ -899,21 +1098,42 @@ function tick(ms) {
 
   // per-frame derived state: prediction, orbit holding, comet rendezvous
   const ship = u.ship;
-  if (state.options.predict && !document.hidden && (predClock += u.frameDt) > 1 / 30) {
+  if (state.options.predict && (!document.hidden || forceRender) && (predClock += u.frameDt) > 1 / 30) {
     predClock = 0;
     pred = predict(u, ship);
   } else if (!state.options.predict || ship.landing) pred = null;
+  ghostPred = ghostBurn && (!document.hidden || forceRender)
+    ? predict(u, { pos: ship.pos, velocity: { x: ship.velocity.x + Math.cos(ghostBurn.dir) * ghostBurn.dv, y: ship.velocity.y + Math.sin(ghostBurn.dir) * ghostBurn.dv }, landing: null, consumed: null }, { steps: 260 })
+    : null;
+  // scoreboard: sim time flown and fuel burned (refuelling does not count) under this style
+  if (autopilot.enabled) {
+    score.t += u.frameDt * u.timeScale * u.warp;
+    if (score.lastFuel !== null && u.fuel.level < score.lastFuel) score.fuel += score.lastFuel - u.fuel.level;
+    score.lastFuel = u.fuel.level;
+  }
+  // hull: heat cooks it, sitting on the ground (or docking) patches it up
+  if (!ship.consumed) {
+    damageHull(HULL.heat(ship.heat ?? 0, u.frameDt), 'heat');
+    if (ship.landing && state.hull < 100) state.hull = Math.min(100, state.hull + 4 * u.frameDt * u.warp);
+  }
+  // errands that ended on their own: the comet left, the rescue is over
+  const at = autopilot.target;
+  if (at?.isRendezvous && ((at.kind === 'comet' && (at.src.dead || u.cometsMet.has(at.src.name))) || (at.kind === 'distress' && !at.src.distress))) autopilot.leave(at);
+  else if (at?.isRendezvous && at.kind !== 'station' && inGiantAir(u, at.pos)) autopilot.leave(at, 90); // it fell into a giant: do not follow
   if (pred?.soi) {
     const o = pred.orbit, b = o.body, top = b.atmo ? b.atmo.top : 0;
     const stable = o.e < 1 && !o.end && o.pe > b.radius + top + 10 && o.ap < (b.hill ?? Infinity) * 0.9;
     const held = u.orbitHeld;
-    held[b.name] = stable ? (held[b.name] ?? 0) + u.frameDt * u.timeScale * u.warp : 0;
+    const before = held[b.name] ?? 0;
+    held[b.name] = stable ? before + u.frameDt * u.timeScale * u.warp : 0;
+    if (before < 30 && held[b.name] >= 30) state.counts.orbitsHeld++;
   }
   for (const c of u.debris.items) {
     if (c.kind !== 'comet' || u.cometsMet.has(c.name)) continue;
     if (dist(c.pos, ship.pos) < 300 && mag(sub(ship.velocity, c.vel)) < 150) {
       u.cometsMet.add(c.name);
-      state.credits += 40; state.stats.comets++;
+      state.credits += 40; state.stats.comets++; state.counts.comets++;
+      postcard({ focus: ship.pos, other: c, caption: `Sampled comet ${c.name}`, sub: universe.star.name, force: true });
       ui.toast(`COMET ${c.name} SAMPLED  +40 CR`, 'good'); sound.dock();
       logEvent(`Sampled comet ${c.name}`);
       persist();
@@ -931,9 +1151,9 @@ function tick(ms) {
     cam.starX += cam.streak.x * u.frameDt * 0.05; cam.starY += cam.streak.y * u.frameDt * 0.05;
   }
 
-  if (!document.hidden) { // nothing to paint in a hidden tab
+  if (!document.hidden || forceRender) { // nothing to paint in a hidden tab
     const ref = pred?.soi ?? u.closestPlanet();
-    renderUniverse(ctx, u, cam, w, h, dpr, false, { pred: jump ? null : pred, markers: !jump, ref });
+    renderUniverse(ctx, u, cam, w, h, dpr, false, { pred: jump ? null : pred, ghost: ghostPred, markers: !jump, ref });
     drawStick(ctx, stick, dpr);
     drawShipCam();
   }
@@ -941,11 +1161,19 @@ function tick(ms) {
   hudClock += ms - lastMs; lastMs = ms;
   if (hudClock > 100) {
     hudClock = 0;
-    if (!document.hidden) updateHud();
+    if (!document.hidden || forceRender) updateHud();
     checkContacts();
   }
   missionClock += Math.max(0, u.frameDt);
-  if (missionClock > 0.25) { cruiseThink(missionClock); missionClock = 0; checkMissions(); }
+  if (missionClock > 0.25) {
+    cruiseThink(missionClock); missionClock = 0; checkMissions();
+    state.counts.systems = Math.max(state.counts.systems, state.galaxy.length);
+    for (const a of checkAchievements(state)) {
+      ui.toast(`ACHIEVEMENT: ${a.name.toUpperCase()} — ${a.desc}`, 'good'); sound.fanfare();
+      logEvent(`Achievement: ${a.name}`);
+      persist();
+    }
+  }
 
   // sound follows what the ship is doing
   sound.update({
@@ -960,7 +1188,15 @@ requestAnimationFrame(raf);
 
 window.__cam = cam; // handy for poking around in the console
 window.__game = {
-  jumpTo, setCruise, cycleWarp, get pred() { return pred; },
+  jumpTo, setCruise, cycleWarp, get pred() { return pred; }, get log() { return log; }, get ghost() { return ghostPred; },
+  // debug: step and paint `seconds` of frames right now (for testing in a background page)
+  run(seconds = 1) {
+    forceRender = true;
+    const prevHidden = predClock; void prevHidden;
+    let t = lastMs;
+    for (let i = 0; i < seconds * 60; i++) tick((t += 1000 / 60));
+    forceRender = false;
+  },
   // renders the floating window's page into an iframe (for testing where real PiP is not allowed)
   async pipTest() {
     const f = document.createElement('iframe');

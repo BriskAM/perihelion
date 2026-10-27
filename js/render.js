@@ -4,7 +4,7 @@ import {
 } from './universe.js';
 import { drawPlanetBody, tint } from './planetart.js';
 import { drawShip } from './ships.js';
-import { makeView, arcPath, discPath, inView } from './view.js';
+import { makeView, arcPath, discPath, inView, ellipsePath } from './view.js';
 
 export const COLORS = {
   void: '#16161d',
@@ -75,8 +75,12 @@ function drawPlanet(ctx, view, p, u, px) {
   ctx.strokeStyle = COLORS.orbit;
   ctx.lineWidth = px;
   ctx.beginPath();
-  const c = p.orbitCenter;
-  if (arcPath(ctx, view, c.x, c.y, p.orbitRadius)) ctx.stroke();
+  const c = p.orbitCenter, r = p.rail;
+  if (r && r.e > 0.002) { // the orbit is an ellipse with the parent at one focus
+    const a = p.orbitRadius, b = a * Math.sqrt(1 - r.e * r.e);
+    const ex = c.x - a * r.e * Math.cos(r.varpi), ey = c.y - a * r.e * Math.sin(r.varpi);
+    if (ellipsePath(ctx, view, ex, ey, a, b, r.varpi)) ctx.stroke();
+  } else if (arcPath(ctx, view, c.x, c.y, p.orbitRadius)) ctx.stroke();
 
   gravitationalField(ctx, view, p, u.now, px);
   const showTex = !view.lite && p.radius * view.zoom > 12;
@@ -401,6 +405,23 @@ function drawPrediction(ctx, pred, px) {
   if (pred.impact) cross(ctx, pred.impact.x, pred.impact.y, px, '#ff6a55');
 }
 
+// burn preview: where you would go after the burn the stick is pointing at (dashed, orange)
+function drawGhost(ctx, g, px) {
+  const pts = g.soi ? g.orbit.pts.map((q) => ({ x: q.x + g.soi.pos.x, y: q.y + g.soi.pos.y })) : g.pts;
+  if (!pts || pts.length < 2) return;
+  ctx.setLineDash([7 * px, 6 * px]);
+  ctx.lineWidth = 1.5 * px;
+  ctx.strokeStyle = 'rgba(255,170,80,0.75)';
+  ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (g.soi) {
+    const o = g.orbit, R = o.body.radius;
+    label(ctx, g.soi.pos.x + o.peAt.x, g.soi.pos.y + o.peAt.y, px, o.end === 'impact' ? 'IMPACT' : `Pe ${fmtD(o.pe - R)}`, 'rgba(255,190,110,0.95)', 14);
+  }
+}
+
 // prograde / retrograde markers on a ring round the ship, relative to the world you are flying near
 function drawShipMarkers(ctx, u, px, ref) {
   const ship = u.ship;
@@ -519,12 +540,42 @@ function drawGrid(ctx, u, view, px) {
 }
 
 // ---- satellites ---------------------------------------------------------------------------
-const SAT_COLORS = { orbiter: '#8fc4ff', geostationary: '#ff9ad0', probe: '#a6f0a0' };
+const SAT_COLORS = { orbiter: '#8fc4ff', geostationary: '#ff9ad0', probe: '#a6f0a0', station: '#ffd27f' };
+
+// a trading station: a slowly turning ring with spokes and docking lights, visible from far out
+function drawStation(ctx, sat, view, px, now) {
+  const { x, y } = sat.pos;
+  const R = Math.max(sat.radius, 5 * px);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(sat.angle);
+  ctx.strokeStyle = SAT_COLORS.station; ctx.lineWidth = 1.6 * px;
+  ctx.beginPath(); ctx.arc(0, 0, R, 0, PI2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, R * 0.35, 0, PI2); ctx.stroke();
+  ctx.beginPath();
+  for (let k = 0; k < 4; k++) { const a = (k * Math.PI) / 2; ctx.moveTo(Math.cos(a) * R * 0.35, Math.sin(a) * R * 0.35); ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R); }
+  ctx.stroke();
+  ctx.fillStyle = sat.cooldown > 0 ? '#ff6a55' : '#4ade80';
+  for (let k = 0; k < 4; k++) {
+    if ((Math.floor(now * 2) + k) % 4 === 0) continue; // blinking docking lights
+    const a = (k * Math.PI) / 2 + Math.PI / 4;
+    ctx.beginPath(); ctx.arc(Math.cos(a) * R, Math.sin(a) * R, 2 * px, 0, PI2); ctx.fill();
+  }
+  ctx.restore();
+  if (!view.lite) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(px, px);
+    ctx.fillStyle = SAT_COLORS.station; ctx.globalAlpha = 0.85;
+    ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`${sat.name.toUpperCase()}${sat.cooldown > 0 ? '' : '  (DOCK)'}`, 0, -Math.max(16, R / px + 8));
+    ctx.restore();
+  }
+}
 
 function drawSatellites(ctx, u, view, px) {
   const ship = u.ship;
   for (const sat of u.satellites) {
     const { x, y } = sat.pos;
+    if (sat.isStation) { if (inView(view, x, y, 400)) drawStation(ctx, sat, view, px, u.now); continue; }
     if (sat.parent && view.zoom > 0.2 && !view.lite) { // faint orbit track
       ctx.strokeStyle = SAT_COLORS[sat.kind];
       ctx.globalAlpha = 0.14;
@@ -637,6 +688,15 @@ function drawTrail(ctx, ship, fancy, px, lite = false) {
 }
 
 function drawSpacecraft(ctx, u, ship, view, px, fancy) {
+  if (ship.distress && !view.lite) {
+    const k = (u.now * 0.8) % 1;
+    ctx.strokeStyle = `rgba(255,90,70,${0.9 * (1 - k)})`; ctx.lineWidth = 2 * px;
+    ctx.beginPath(); ctx.arc(ship.pos.x, ship.pos.y, (8 + 30 * k) * px, 0, PI2); ctx.stroke();
+    ctx.save(); ctx.translate(ship.pos.x, ship.pos.y); ctx.scale(px, px);
+    ctx.fillStyle = '#ff8a75'; ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`MAYDAY ${ship.name}`, 0, -42);
+    ctx.restore();
+  }
   if (!inView(view, ship.pos.x, ship.pos.y, 80) && !ship.track.length) return;
   drawTrail(ctx, ship, fancy, px, view.lite);
   if (!inView(view, ship.pos.x, ship.pos.y, 80)) return;
@@ -655,6 +715,14 @@ function drawSpacecraft(ctx, u, ship, view, px, fancy) {
     }
     ctx.restore();
   }
+  // true scale: from far out the hull is smaller than a couple of pixels, so it is just a point of light
+  // (the ship cam shows its heading)
+  if (ship.radius / px < 1.6 && !ship.consumed) {
+    ctx.fillStyle = ship.isAI ? 'rgba(200,200,255,0.7)' : '#fff';
+    const r = (ship.isAI ? 0.9 : 1.3) * px;
+    ctx.beginPath(); ctx.arc(ship.pos.x, ship.pos.y, r, 0, PI2); ctx.fill();
+    return;
+  }
   ctx.save();
   ctx.translate(ship.pos.x, ship.pos.y);
   // tidal stretching toward a nearby black hole (and the final fade)
@@ -670,11 +738,8 @@ function drawSpacecraft(ctx, u, ship, view, px, fancy) {
   if (ship.consumed) alpha = 1 - clamp(ship.consumed.t / CONSUME_TIME, 0, 1) ** 2;
   ctx.globalAlpha = alpha;
   ctx.rotate(ship.angle);
-  // true scale, with just a tiny floor so your ship never vanishes into a sub-pixel speck
-  const k = view.lite ? 1 : Math.max(1, ((ship.isAI ? 2.5 : 4) * px) / 12);
-  ctx.scale(k, k);
   drawShip(ctx, ship.design, {
-    thrust: ship.effThrust ?? mag(ship.thrust), now: u.now, px: px / k, transit: ship.transit,
+    thrust: ship.effThrust ?? mag(ship.thrust), now: u.now, px, transit: ship.transit,
     landed: !!ship.landing, fancy, void: COLORS.void,
   });
   ctx.restore();
@@ -805,6 +870,7 @@ export function renderUniverse(ctx, u, cam, w, h, dpr, lite = false, extra = {})
   if (!lite) for (const sp of u.sparks) drawSpark(ctx, sp, px);
   for (const p of u.planets) drawPlanet(ctx, view, p, u, px);
   if (extra.pred) drawPrediction(ctx, extra.pred, px);
+  if (extra.ghost) drawGhost(ctx, extra.ghost, px);
   if (!lite && u.ship.autopilot) drawAutopilot(ctx, u.ship.autopilot, u.now, px);
   const fancy = u.style.fancy;
   for (const sh of u.ships) if (sh !== u.ship) drawSpacecraft(ctx, u, sh, view, px, fancy);

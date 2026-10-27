@@ -95,6 +95,7 @@ export class Camera {
     if (ap?.via && moving) options.push(['flyby', 4]);
     if (!ship.landing && base.dSurf > 9000) options.push(['system', 0.7]);
     if (ship.landing) options.push(['low', 3]);
+    for (const o of options) o[1] *= this.style?.shots?.[o[0]] ?? 1; // the personality's taste in shots
     const total = options.reduce((s, o) => s + o[1], 0);
     let x = r * total, name = 'chase';
     for (const [n, wgt] of options) { x -= wgt; if (x < 0) { name = n; break; } }
@@ -109,7 +110,7 @@ export class Camera {
       shot.zoom = base.zoom * 0.85;
       shot.dur = 7;
     } else shot.dur = { chase: 14, wide: 10, planet: 12, system: 7, low: 12 }[name] ?? 10;
-    shot.dur *= 0.8 + Math.random() * 0.5;
+    shot.dur *= (0.8 + Math.random() * 0.5) * (this.style?.shotLen ?? 1);
     return shot;
   }
 

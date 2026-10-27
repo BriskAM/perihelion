@@ -100,6 +100,45 @@ star system, land on planets, and fill your codex. Works on phones (touch) and l
   would clip the world or go wide), and reports how far it was turned and the speed it gained or lost.
 - New missions: hold a stable orbit for 30 s, and rendezvous with a comet.
 
+## A living system
+- **Elliptical orbits**: every world rides an exact Kepler ellipse, fast near the star and slow far out.
+  Random systems roll gentle eccentricities, capped so worlds keep to their lanes; our solar system uses
+  the real values (Mercury 0.21, Mars 0.09 and so on). The orbit lines are drawn as the true ellipses.
+- **Hull and repairs**: rock hits, hard landings and overheating wear the hull (armour upgrades soften
+  it). Time on the ground patches it, satellites help, and stations fix it completely. Hull 0 is a loss.
+- **Mining**: touch a belt rock (or a loose one) gently and it goes into the hold. Sell ore at satellites
+  (4 CR) or stations (8 CR). Cargo hold upgrades carry more.
+- **Stations** sit at the L4/L5 Lagrange points of giant worlds, among their trojan swarms: full refuel,
+  full repair, best ore price.
+- **Storms** brew on gas giants (a churning spiral with lightning); a scan pass during one pays double.
+  Deeper scan passes pay more in any weather.
+- **Volcanoes**: molten worlds (and Io) erupt; the rock they throw is a real free body that falls back and
+  scars the surface, or escapes into orbit around the star.
+- **Mayday**: now and then an AI ship runs dry and drifts. Match its speed to tow it (+150 CR). Cruise
+  goes on rescues itself, and also visits stations when damaged, low on fuel or carrying ore.
+- **Burn preview**: hold the stick inside its dead zone and a dashed orange path shows where a burn that
+  way would take you; push further to fire.
+- **Postcards**: slingshots, first landings, eruptions, comet strikes, rescues and arrivals are framed and
+  captioned automatically (MENU > POSTCARDS). Cruise collects them while you are away.
+- **Galaxy map and achievements** (MENU > GALAXY): every system you have visited, joined in the order
+  you flew them (tap one to jump back), and 20 achievements.
+- Ships are drawn to scale: from far out yours is a single point (the ship cam shows its heading).
+
+## Autopilot styles (K, or MENU > OPTIONS)
+The autopilot has personalities: the same pilot with different dials (speed, slingshot appetite and how
+tight it swings, scan depth, orbit tours, landing style, dwell, cruise warp, comet detours, how long it
+stays in a system, and which shots the cinematic camera favours). The HUD keeps score for the current one.
+- **Balanced**: a bit of everything.
+- **Racer**: as fast as possible. Hard burns, direct landings, max warp, no sightseeing.
+- **Efficient**: as little fuel as possible. Gentle speeds, aerobraking, a slingshot whenever it helps.
+- **Cinematic**: as spectacular as possible. Tight slingshots, deep scan passes, orbit tours, comet chases.
+- **Explorer**: charts far worlds as readily as near ones and jumps on as soon as a system is done.
+- **Daredevil**: skims everything just above the clouds and runs rock belts fast.
+
+`test/persona-harness.js` flies each style through the same systems. Over 12 simulated minutes in six
+systems: Efficient used about 40% less fuel per world than Balanced with no crashes, Racer and Explorer
+charted the most, and Daredevil took twice Balanced's slingshots and the most orbit tours.
+
 ## Cruise (AFK) and the floating window
 - **Cruise** (`C`): the autopilot keeps exploring on its own. It warps through long coasts, is towed free
   if it runs dry, buys the cheapest upgrade it can afford and, once a system is charted (or nothing new has

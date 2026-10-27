@@ -88,13 +88,44 @@ export class Planet extends Body {
     this.seed = Math.floor(radius * 1000) >>> 0; // drives its look
   }
   get orbitCenter() { return this.parent ? this.parent.pos : this._center; }
+
+  /**
+   * Put the body on a Keplerian rail: an ellipse with eccentricity e whose closest point (periapsis)
+   * points along varpi, with orbitRadius as the semi-major axis. The rail is closed-form, so any
+   * moment past or future is exact (the trajectory predictor uses that), and the body moves fast near
+   * periapsis and slow near apoapsis, as Kepler's second law says. `theta` is its current angle.
+   */
+  initRail(now, theta, e = 0, varpi = 0) {
+    const n = this.orbitRadius > 0 ? this.speed / this.orbitRadius : 0; // mean motion
+    const nu = theta - varpi;
+    const E = 2 * Math.atan2(Math.sqrt(1 - e) * Math.sin(nu / 2), Math.sqrt(1 + e) * Math.cos(nu / 2));
+    this.rail = { e, varpi, n, M0: E - e * Math.sin(E) - n * now };
+    this.pos = this.opos = this.posAt(now);
+  }
+
+  /** Where the body is at sim time `time`. */
+  posAt(time) {
+    const r = this.rail;
+    if (!r || !this.orbitRadius) return this.pos;
+    const c = this.parent ? this.parent.posAt(time) : this._center;
+    const e = r.e, a = this.orbitRadius;
+    const M = r.M0 + r.n * time;
+    let E = e < 0.8 ? M : Math.PI;
+    for (let i = 0; i < 6 && e > 0; i++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E)); // Kepler's equation
+    const x = a * (Math.cos(E) - e), y = a * Math.sqrt(1 - e * e) * Math.sin(E);
+    const cw = Math.cos(r.varpi), sw = Math.sin(r.varpi);
+    return { x: c.x + x * cw - y * sw, y: c.y + x * sw + y * cw };
+  }
+
   update(sim, dt) {
+    if (this.rail) { this.opos = this.pos; this.pos = this.posAt(sim.now); return; }
     const a = angleOf(sub(this.pos, this.orbitCenter));
     const tangential = fromAngle(a + Math.PI / 2, this.speed); // constant linear velocity
     this.velocity = this.parent ? add(this.parent.velocity, tangential) : tangential;
     super.update(sim, dt);
   }
   postUpdate(sim, dt) {
+    if (this.rail) { super.postUpdate(sim, dt); return; } // velocity from the step we just took
     // pin to the orbit, like a constraint (parents are post-updated before their children)
     const a = angleOf(sub(this.pos, this.orbitCenter));
     this.pos = add(this.orbitCenter, fromAngle(a, this.orbitRadius));
@@ -217,6 +248,13 @@ export class Satellite {
   }
   update(sim, dt) {
     if (this.cooldown > 0 && sim) this.cooldown -= dt;
+    if (this.host) { // a station at a Lagrange point: 60 degrees ahead of (or behind) its world on the same orbit
+      const now = sim ? sim.now : this.t0;
+      const a = this.host.posAt(now + this.lag), b = this.host.posAt(now + this.lag + 0.05);
+      this.pos = a; this.velocity = vec((b.x - a.x) / 0.05, (b.y - a.y) / 0.05);
+      this.angle += 0.12 * dt;
+      return;
+    }
     if (this.parent) {
       this.angle += this.omega * dt;
       const p = this.parent;
@@ -378,10 +416,45 @@ export class Universe {
     this.onServiced = null; // (satellite) => void; docked with a satellite
     this.debris = new DebrisField(this);
     if (system === 'sol') this.initSol(shipModel); else this.initRandom(shipModel);
+    this.assignOrbits();
     this.setupBeltPhysics();
     const crng = makeRng((this.randomSeed ^ 0xc0e7) >>> 0);
     const comets = system === 'sol' ? 1 : crng() < 0.75 ? crng.int(1, 3) : 0;
     this.debris.makeComets(comets, `C/${(this.star.name ?? 'Sol').split(/[ .]/)[0]}`);
+  }
+
+  /**
+   * Elliptical orbits. Every rail body gets a Kepler ellipse. Random systems roll mostly gentle
+   * eccentricities, capped so no world swings into its neighbours' lanes or out past the edge; our own
+   * solar system uses the real values (Pluto's squeezed a little to stay inside the map).
+   */
+  assignOrbits() {
+    const rng = makeRng((this.randomSeed ^ 0xecc0) >>> 0);
+    const all = [...this.anchors, ...this.stars.filter((s) => s.speed), ...this.blackHoles.filter((b) => b.speed && !this.stars.includes(b)), ...this.planets];
+    const theta = new Map(all.map((b) => [b, angleOf(sub(b.pos, b.orbitCenter))])); // before anything moves
+    const tops = all.filter((b) => !b.parent && !this.stars.includes(b) && !b.isBlackHole);
+    const lanes = [this.minOrbit * 0.7, ...tops.map((b) => b.orbitRadius), ...this.belts.flatMap((b) => [b.radius - b.width / 2, b.radius + b.width / 2])];
+    const SOL_E = { Mercury: [0.206, 77], Venus: [0.007, 131], Earth: [0.017, 103], Mars: [0.093, 336], Jupiter: [0.049, 14], Saturn: [0.057, 93], Uranus: [0.046, 173], Neptune: [0.009, 48] };
+    const done = new Set();
+    const init = (b) => {
+      if (done.has(b)) return;
+      if (b.parent) init(b.parent); // parents first: a moon's rail is drawn round where its parent is
+      done.add(b);
+      let e = 0, varpi = rng() * PI2;
+      if (tops.includes(b)) {
+        if (this.systemId === 'sol') {
+          const name = b.isAnchor ? 'Pluto' : b.name;
+          const real = name === 'Pluto' ? [0.249, 224] : SOL_E[name];
+          if (real) { e = real[0]; varpi = (real[1] * Math.PI) / 180; }
+        } else e = rng() ** 2 * 0.24;
+        const a = b.orbitRadius;
+        const gap = Math.min(...lanes.filter((l) => Math.abs(l - a) > 1).map((l) => Math.abs(l - a)));
+        e = Math.min(e, this.systemId === 'sol' ? 1 : (0.42 * gap) / a, (UNIVERSE_RANGE * 0.96) / a - 1);
+        e = Math.max(0, e);
+      }
+      b.initRail(this.now, theta.get(b), e, varpi);
+    };
+    for (const b of all) init(b);
   }
 
   /**
@@ -431,7 +504,7 @@ export class Universe {
     // trojan swarms around the giants (not in our own solar system: Jupiter's are too small to see here)
     if (this.systemId !== 'sol') {
       for (const p of worlds) {
-        if (p.radius < 1100 || p.parent || rng() > 0.6) continue;
+        if (p.radius < 1100 || p.parent || rng() > 0.6 || (p.rail?.e ?? 0) > 0.06) continue; // (trojans need a near-circular orbit)
         const theta0 = angleOf(sub(p.pos, p.orbitCenter)), omega = p.speed / p.orbitRadius, now0 = this.now;
         const width = clamp(p.hill * 0.08, 1200, 4500);
         const belt = new Belt(p.orbitRadius, width, omega, rng, {
@@ -445,6 +518,25 @@ export class Universe {
         this.belts.push(belt);
       }
     }    for (const b of this.belts) b.updateWakes();
+    this.makeStations(rng);
+  }
+
+  /** Trading stations at L4/L5: refuel, repair, buy ore. One per trojan host, or one at the biggest world. */
+  makeStations(rng) {
+    const hosts = this.belts.filter((b) => b.trojan).map((b) => b.trojan);
+    if (!hosts.length) {
+      const big = this.planets.filter((p) => !p.parent && p.rail && p.rail.e < 0.12).sort((a, b) => b.mass - a.mass)[0];
+      if (big) hosts.push(big);
+    }
+    for (const h of hosts) {
+      const P = PI2 / h.rail.n, lead = rng() < 0.5 ? 1 : -1;
+      const st = new Satellite({ name: `${h.name} ${lead > 0 ? 'L4' : 'L5'} Station`, kind: 'station' });
+      st.host = h; st.lag = (lead * P) / 6; st.t0 = this.now;
+      st.radius = 26; st.dockR = 95; st.isStation = true;
+      st.update(null, 0);
+      this.satellites.push(st);
+    }
+    this.stations = this.satellites.filter((s) => s.isStation);
   }
 
   // orbital speed around the whole system's mass
@@ -528,6 +620,10 @@ export class Universe {
     const centripetal = (p) => {
       if (!p.speed) return vec();
       const c = p.orbitCenter, d = dist(c, p.pos) || 1;
+      if (p.rail) { // inverse square toward the focus; mu = n^2 a^3 (equal to v^2/r on a circle)
+        const mu = p.rail.n * p.rail.n * p.orbitRadius ** 3;
+        return mul(sub(c, p.pos), mu / (d * d * d));
+      }
       return mul(sub(c, p.pos), (p.speed * p.speed) / (d * d));
     };
     for (const a of this.anchors) a.acc = centripetal(a);
@@ -912,6 +1008,7 @@ export class Universe {
 
   respawnAI(ship) {
     ship.consumed = null;
+    if (ship.distress) { ship.distress = null; ship.autopilot.enabled = true; }
     ship.pos = ship.opos = this.safeSpot(this.aiRng);
     ship.velocity = vec();
     ship.track.length = 0;
@@ -969,6 +1066,7 @@ export class Universe {
       }
     }
     for (const s of this.ships) if (!s.consumed) this.atmosphere(s, dt);
+    this.events?.update(dt);
     if (!ship.consumed && !ship.landing) this.scanGiants(ship, dt);
     for (const e of this.entities) e.update(this, dt);
     for (const a of this.anchors) a.update(this, dt);
@@ -1159,10 +1257,11 @@ export class Universe {
     if (ship.landing) return;
     for (const sat of this.satellites) {
       const dx = ship.pos.x - sat.pos.x, dy = ship.pos.y - sat.pos.y;
-      if (Math.abs(dx) > 120 || Math.abs(dy) > 120) continue;
+      const reach = sat.dockR ?? 45;
+      if (Math.abs(dx) > reach + 80 || Math.abs(dy) > reach + 80) continue;
       const d = Math.hypot(dx, dy), rel = mag(sub(ship.velocity, sat.velocity));
-      if (d < 45 && rel < 90 && sat.cooldown <= 0 && !ship.isAI) {
-        sat.cooldown = 90;
+      if (d < reach && rel < 90 && sat.cooldown <= 0 && !ship.isAI) {
+        sat.cooldown = sat.isStation ? 40 : 90;
         if (this.fuel.on) this.fuel.level = Math.min(this.fuel.capacity, this.fuel.level + 15);
         if (this.onServiced) this.onServiced(sat);
       } else if (d < sat.radius + ship.radius && rel >= 90) {
@@ -1204,6 +1303,11 @@ export class Universe {
       if (d2 >= need * need) return;
       const d = Math.sqrt(d2) || 1;
       const nx = dx / d, ny = dy / d;
+      if (!ship.isAI && this.onMine) { // a slow touch: scoop the rock into the hold
+        const a0 = belt.angle(i, this.now), sp0 = belt.omega * belt.r[i];
+        const rv = sub(ship.velocity, vec(-Math.sin(a0) * sp0, Math.cos(a0) * sp0));
+        if (mag(rv) < 75 && this.onMine(size, vec(rx, ry))) { belt.gone[i] = 1; return; }
+      }
       ship.pos = vec(rx + nx * need, ry + ny * need);
       // bounce: reflect the velocity relative to the rock (restitution 0.4), then re-encode it in
       // opos because velocities are rebuilt from positions after the constraints
@@ -1219,7 +1323,7 @@ export class Universe {
           belt.gone[i] = 1;
           const kick = mul(vec(-nx, -ny), -into * 0.75);
           this.debris.spawnRock(vec(rx, ry), add(rock, add(kick, fromAngle(this.rng() * PI2, 15))), size, belt.shape[i]);
-          if (this.onRockHit) this.onRockHit(-into);
+          if (this.onRockHit) this.onRockHit(-into, vec(rx, ry));
         }
       }
       if (ship.hitCooldown > 0) return;

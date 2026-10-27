@@ -119,3 +119,11 @@ pre { margin: 0; font: inherit; white-space: pre-wrap; }
 }
 #away .head { color: #e6ffe9; margin-bottom: 6px; font-weight: 600; }
 @media (max-width: 420px) { .row { gap: 4px; } #auto, #pipbtn, #cruise, #warp { padding: 6px 5px; min-width: 40px; font-size: 11px; } }
+
+/* galaxy map and postcards */
+canvas.galaxy { width: 100%; max-width: 520px; aspect-ratio: 520 / 340; border: 1px solid #3c3c4f; display: block; cursor: pointer; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.postcard { margin: 0; border: 1px solid #3c3c4f; cursor: zoom-in; }
+.postcard img { width: 100%; display: block; aspect-ratio: 3 / 2; object-fit: cover; }
+.postcard figcaption { font-size: 10px; line-height: 13px; padding: 4px 6px; opacity: 0.8; }
+.postcard.big { grid-column: 1 / -1; cursor: zoom-out; }

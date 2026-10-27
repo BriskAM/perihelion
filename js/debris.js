@@ -142,8 +142,10 @@ export class DebrisField {
       const d = Math.hypot(dx, dy) || 1;
       if (d >= need) continue;
       const nx = dx / d, ny = dy / d;
-      ship.pos = vec(it.pos.x + nx * need, it.pos.y + ny * need);
       const rel = sub(ship.velocity, it.vel), into = rel.x * nx + rel.y * ny;
+      if (it.kind === 'rock' && !ship.isAI && this.u.onMine && mag(rel) < 130 && this.u.onMine(it.size, it.pos)) { it.dead = true; continue; }
+      ship.pos = vec(it.pos.x + nx * need, it.pos.y + ny * need);
+      if (!ship.isAI && into < -110 && this.u.onRockHit && !it.hitAt) { it.hitAt = 1; this.u.onRockHit(-into, it.pos); }
       if (into < 0 && dt > 0) {
         const v = add(it.vel, sub(rel, mul(vec(nx, ny), 1.4 * into)));
         ship.opos = sub(ship.pos, mul(v, dt));

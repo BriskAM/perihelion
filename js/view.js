@@ -68,3 +68,37 @@ export function discPath(ctx, view, cx, cy, r) {
   ctx.closePath();
   return true;
 }
+
+/**
+ * Add an ellipse (centre cx, cy; semi-axes a, b; rotated by rot) to the path, only the visible part
+ * when it is big on screen. Returns false when nothing is visible.
+ */
+export function ellipsePath(ctx, view, cx, cy, a, b, rot) {
+  if (a * view.zoom < 140) {
+    if (!inView(view, cx, cy, a)) return false;
+    ctx.moveTo(cx + Math.cos(rot) * a, cy + Math.sin(rot) * a);
+    ctx.ellipse(cx, cy, a, b, rot, 0, PI2);
+    return true;
+  }
+  // work in the ellipse's own frame, stretched into a circle of radius a
+  const cr = Math.cos(rot), sr = Math.sin(rot);
+  const dx = view.cx - cx, dy = view.cy - cy;
+  const lx = dx * cr + dy * sr, ly = (-dx * sr + dy * cr) * (a / b);
+  const d = Math.hypot(lx, ly), H = view.h * (a / b);
+  if (Math.abs(d - a) > H) return false;
+  let from = 0, to = PI2;
+  if (d > 1e-6) {
+    const base = Math.atan2(ly, lx);
+    const c = Math.max(-1, Math.min(1, (a * a + d * d - H * H) / (2 * a * d)));
+    const phi = Math.acos(c) + 0.01;
+    from = base - phi; to = base + phi;
+  }
+  const step = 2 * Math.acos(Math.max(0, 1 - view.tol / a));
+  const n = Math.min(6000, Math.max(2, Math.ceil((to - from) / step)));
+  for (let i = 0; i <= n; i++) {
+    const t = from + ((to - from) * i) / n, x = a * Math.cos(t), y = b * Math.sin(t);
+    const px = cx + x * cr - y * sr, py = cy + x * sr + y * cr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  return true;
+}

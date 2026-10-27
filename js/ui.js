@@ -1,5 +1,9 @@
 import { UPGRADES, MAX_UPGRADE, MILESTONES } from './save.js';
 import { SHIP_MODELS, MODEL_IDS } from './ships.js';
+import { loadPostcards } from './postcards.js';
+import { ACHIEVEMENTS } from './achievements.js';
+import { STAR_COLORS } from './universe.js';
+import { PERSONALITIES } from './personalities.js';
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -17,7 +21,7 @@ export function createUI({ state, game, actions }) {
   const toasts = document.getElementById('toasts');
   let tab = 'missions';
 
-  const TABS = [['missions', 'MISSIONS'], ['codex', 'CODEX'], ['ship', 'SHIP'], ['options', 'OPTIONS']];
+  const TABS = [['missions', 'MISSIONS'], ['postcards', 'POSTCARDS'], ['galaxy', 'GALAXY'], ['codex', 'CODEX'], ['ship', 'SHIP'], ['options', 'OPTIONS']];
   for (const [id, label] of TABS) {
     const b = el('button', 'tab', label);
     b.dataset.tab = id;
@@ -138,6 +142,16 @@ export function createUI({ state, game, actions }) {
     crow.append(button(state.cruise ? 'CRUISE: ON' : 'CRUISE: OFF', () => actions.cruise(!state.cruise)));
     cruise.append(crow);
     body.append(cruise);
+    const style = el('div', 'card');
+    style.append(el('div', 'title', 'Autopilot style (K)'), el('div', 'dim', PERSONALITIES[state.options.persona]?.desc ?? ''));
+    const srow = el('div', 'btnrow');
+    for (const [id, P] of Object.entries(PERSONALITIES)) {
+      const b = button(P.name.toUpperCase(), () => actions.persona(id));
+      b.classList.toggle('picked', state.options.persona === id);
+      srow.append(b);
+    }
+    style.append(srow, el('div', 'dim', 'The HUD keeps score for the current style: worlds charted per hour, fuel per world, slingshots taken.'));
+    body.append(style);
     toggleRow('hop', 'Cruise: jump to new systems', 'When everything here is charted (or nothing new has turned up for a while), cruise jumps to a fresh random system.');
     toggleRow('autobuy', 'Cruise: buy upgrades', 'Spend credits on the cheapest ship upgrade whenever cruise can afford one.');
     toggleRow('cruiseWarp', 'Cruise: time warp', 'Speed up long coasts between worlds (2x to 8x), dropping back to normal near anything.');
@@ -190,10 +204,77 @@ export function createUI({ state, game, actions }) {
     body.append(danger);
   }
 
+  // every system visited, laid out on a little star map (positions come from the seed), joined in the
+  // order you flew them. Tap one to jump back.
+  function renderGalaxy() {
+    const g = state.galaxy;
+    body.append(el('h2', '', `GALAXY: ${g.length} SYSTEM${g.length === 1 ? '' : 'S'} VISITED`));
+    const c = el('canvas', 'galaxy');
+    const W = 520, H = 340, d = Math.min(window.devicePixelRatio || 1, 2);
+    c.width = W * d; c.height = H * d;
+    const ctx = c.getContext('2d');
+    ctx.scale(d, d);
+    ctx.fillStyle = '#101016'; ctx.fillRect(0, 0, W, H);
+    const place = (e) => {
+      let h = (e.system === 'sol' ? 7 : e.seed) >>> 0;
+      h = Math.imul(h ^ (h >>> 16), 2246822519) >>> 0; h = Math.imul(h ^ (h >>> 13), 3266489917) >>> 0;
+      const a = (h & 0xffff) / 65536 * Math.PI * 2, r = Math.sqrt((h >>> 16) / 65536);
+      return { x: W / 2 + Math.cos(a) * r * (W / 2 - 40), y: H / 2 + Math.sin(a) * r * (H / 2 - 30) * 0.95 };
+    };
+    const pts = g.map(place);
+    ctx.strokeStyle = 'rgba(76,141,246,0.45)'; ctx.lineWidth = 1;
+    ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.stroke();
+    const here = game.here;
+    g.forEach((e, i) => {
+      const p = pts[i], cls = String(e.cls).split('+')[0];
+      const done = e.total ? e.charted / e.total : 0;
+      ctx.fillStyle = cls === 'BH' ? '#000' : STAR_COLORS[cls] ?? '#fff';
+      ctx.strokeStyle = cls === 'BH' ? '#fff4d8' : 'transparent';
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3 + 3 * done, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (e.seed === here.seed && (e.system ?? null) === here.system) {
+        ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1;
+      }
+      if (g.length < 30 || i >= g.length - 8) {
+        ctx.fillStyle = 'rgba(183,183,255,0.8)'; ctx.font = '9px ui-monospace, Menlo, monospace';
+        ctx.fillText(`${e.name.split(' ')[0]} ${e.charted}/${e.total}`, p.x + 8, p.y + 3);
+      }
+    });
+    c.addEventListener('click', (ev) => {
+      const r = c.getBoundingClientRect(), x = ((ev.clientX - r.left) / r.width) * W, y = ((ev.clientY - r.top) / r.height) * H;
+      let best = -1, bd = 14;
+      pts.forEach((p, i) => { const dd = Math.hypot(p.x - x, p.y - y); if (dd < bd) { bd = dd; best = i; } });
+      if (best >= 0) actions.travel(g[best].seed, g[best].system);
+    });
+    body.append(c, el('p', 'dim', 'Bigger dots are more fully charted. Tap a system to jump back to it.'));
+    const got = new Set(state.achievements);
+    body.append(el('h2', '', `ACHIEVEMENTS ${got.size}/${ACHIEVEMENTS.length}`));
+    for (const [id, name, desc] of ACHIEVEMENTS) {
+      const card = el('div', 'card' + (got.has(id) ? '' : ' done'));
+      card.append(el('div', 'title', (got.has(id) ? '★ ' : '☆ ') + name), el('div', 'dim', desc));
+      body.append(card);
+    }
+  }
+
+  function renderPostcards() {
+    const cards = loadPostcards().slice().reverse();
+    body.append(el('h2', '', `POSTCARDS: ${cards.length}`));
+    if (!cards.length) body.append(el('p', 'dim', 'Slingshots, first landings, eruptions, rescues and arrivals get snapped automatically. Leave cruise running and come back to a stack of them.'));
+    const grid = el('div', 'cards');
+    for (const c of cards) {
+      const fig = el('figure', 'postcard');
+      const img = el('img'); img.src = c.img; img.alt = c.caption;
+      const mins = Math.round((Date.now() - c.t) / 60_000);
+      fig.append(img, el('figcaption', '', `${c.caption} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`));
+      fig.addEventListener('click', () => fig.classList.toggle('big'));
+      grid.append(fig);
+    }
+    body.append(grid);
+  }
+
   function render() {
     body.replaceChildren();
     for (const b of tabsEl.querySelectorAll('.tab[data-tab]')) b.classList.toggle('on', b.dataset.tab === tab);
-    ({ missions: renderMissions, codex: renderCodex, ship: renderShip, options: renderOptions })[tab]();
+    ({ missions: renderMissions, postcards: renderPostcards, galaxy: renderGalaxy, codex: renderCodex, ship: renderShip, options: renderOptions })[tab]();
   }
 
   return { toggle, toast, render, get open() { return !menu.hidden; } };
